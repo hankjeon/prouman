@@ -2,11 +2,12 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSettings, Qt
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeySequence
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton, QSplitter, QTableView,
-                               QTabWidget, QVBoxLayout, QWidget)
+                               QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton, QSplitter, QStyle,
+                               QStyledItemDelegate, QStyleOptionViewItem, QTableView, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from .engine import calculate
 from .loading import load_inputs
@@ -16,7 +17,11 @@ from .tables import (issue_table, people_summary_table, person_detail_table, pro
                      project_summary_table)
 
 YAML_FILTER = 'YAML 파일 (*.yaml *.yml);;모든 파일 (*)'
+SELECTION_COLOR = QColor('#b7dcff')
+CURRENT_CELL_COLOR = QColor('#1a73e8')
 SEVERITY_COLORS = {'ERROR': QColor('#c62828'), 'WARNING': QColor('#b26a00')}
+# Windows 기본 UI 글꼴(9pt)은 고해상도 모니터에서 작아서 기본값을 키운다.
+DEFAULT_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE = 10, 7, 24
 
 
 class ResultTableModel(QAbstractTableModel):
@@ -63,6 +68,28 @@ class ResultTableModel(QAbstractTableModel):
         return None
 
 
+class SelectionDelegate(QStyledItemDelegate):
+    """선택 셀을 직접 칠한다.
+
+    Windows 11 기본 스타일은 선택 셀을 거의 보이지 않는 회색으로, 현재 셀은 흰 바탕으로 그리고
+    스타일시트로도 포커스 상태에 따라 일관되게 바뀌지 않는다. 포커스와 관계없이 선택 범위는 같은 색,
+    현재 셀은 테두리로 표시한다. 글자 색(검증 행 색 등)은 그대로 둔다.
+    """
+
+    def paint(self, painter, option, index):
+        state = option.state
+        plain = QStyleOptionViewItem(option)
+        plain.state = state & ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
+        if state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, SELECTION_COLOR)
+        super().paint(painter, plain, index)
+        if state & QStyle.StateFlag.State_HasFocus:
+            painter.save()
+            painter.setPen(CURRENT_CELL_COLOR)
+            painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+            painter.restore()
+
+
 class CopyTableView(QTableView):
     """선택한 셀 범위를 탭으로 구분한 텍스트로 복사한다. 선택하지 않은 칸은 비워 둔다."""
 
@@ -72,8 +99,19 @@ class CopyTableView(QTableView):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setWordWrap(False)
         self.verticalHeader().setVisible(False)
-        self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 8)
+        self.fit_rows()
+        self.setItemDelegate(SelectionDelegate(self))
         self.setModel(ResultTableModel())
+
+    def fit_rows(self):
+        self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 8)
+
+    def changeEvent(self, event):
+        # 글자 크기가 바뀌면 행 높이와 열 너비를 새 크기에 맞춘다.
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.fit_rows()
+            self.resizeColumnsToContents()
 
     def show_table(self, headers, rows, **options):
         self.setModel(ResultTableModel(headers, rows, **options))
@@ -141,7 +179,7 @@ class MainWindow(QMainWindow):
 
         self.issue_view = CopyTableView()
         self.people_summary_view, self.project_summary_view = CopyTableView(), CopyTableView()
-        summary = QSplitter(Qt.Vertical)
+        summary = QSplitter(Qt.Horizontal)
         for title, view in (('개인별 연간 요약', self.people_summary_view),
                             ('사업별 연간 요약', self.project_summary_view)):
             box = QWidget()
@@ -150,6 +188,8 @@ class MainWindow(QMainWindow):
             layout.addWidget(QLabel(title))
             layout.addWidget(view)
             summary.addWidget(box)
+        # 개인별 요약은 4열, 사업별 요약은 사업명이 있어 더 넓게 둔다.
+        summary.setSizes([400, 800])
         self.person_list = QListWidget()
         self.person_list.currentTextChanged.connect(self.show_person)
         self.person_view = CopyTableView()
@@ -170,11 +210,34 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         self.setCentralWidget(central)
 
+        view_menu = self.menuBar().addMenu('보기')
+        for text, keys, step in (('글자 크게', [QKeySequence.ZoomIn, QKeySequence('Ctrl+=')], 1),
+                                 ('글자 작게', [QKeySequence.ZoomOut], -1),
+                                 ('기본 크기', [QKeySequence('Ctrl+0')], 0)):
+            action = QAction(text, self)
+            action.setShortcuts(keys)
+            action.triggered.connect(lambda checked=False, step=step: self.change_font_size(step))
+            view_menu.addAction(action)
+        self.set_font_size(self.settings.value('font_size', DEFAULT_FONT_SIZE, type=int), save=False)
+
         self.projects_edit.setText(self.settings.value('projects_file', '', type=str))
         self.people_edit.setText(self.settings.value('people_file', '', type=str))
 
     def warn(self, title, text):
         QMessageBox.warning(self, title, text)
+
+    def set_font_size(self, size, save=True):
+        # 창 글꼴만 바꾸면 하위 위젯 전체에 전파된다. 사용자가 바꾼 크기만 기억해 다음 실행에 쓴다.
+        # 시작할 때 저장하지 않아야 나중에 기본값을 바꿔도 크기를 바꾼 적 없는 사용자에게 적용된다.
+        self.font_size = max(MIN_FONT_SIZE, min(MAX_FONT_SIZE, size))
+        font = QFont(self.font())
+        font.setPointSize(self.font_size)
+        self.setFont(font)
+        if save:
+            self.settings.setValue('font_size', self.font_size)
+
+    def change_font_size(self, step):
+        self.set_font_size(self.font_size + step if step else DEFAULT_FONT_SIZE)
 
     def start_folder(self):
         for text in (self.people_edit.text(), self.projects_edit.text()):

@@ -125,6 +125,7 @@ Linux에서는 같은 인자를 `./run.sh`에 전달한다. `--person`, `--proje
 - **엑셀 저장**은 CLI의 `--excel`과 같은 파일을 만든다.
 - `ERROR`가 있으면 검증 탭만 보여 주고 엑셀 저장을 막는다.
 - 생성에 성공한 파일 경로는 기억해 두었다가 다음 실행 때 채운다.
+- 글자 크기는 기본 10pt이며 **보기** 메뉴 또는 Ctrl + `+`(Ctrl + `=`) / Ctrl + `-`로 7~24pt 사이에서 조절하고 Ctrl + `0`으로 기본값으로 돌린다. 바꾼 크기는 다음 실행 때도 유지된다.
 - CLI는 작업 디렉터리의 `projects.yaml`을 읽지만, GUI는 사업 파일 경로를 직접 고른다.
 
 Linux에서는 Qt 실행에 필요한 시스템 라이브러리(예: Debian/Ubuntu의 `libxkbcommon-x11-0`, `libxcb-cursor0`, `libegl1`)가 있어야 한다.

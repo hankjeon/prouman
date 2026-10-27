@@ -23,7 +23,8 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from test_allocation import person, project
 
 if QApplication is not None:
-    from allocation.gui import SEVERITY_COLORS, MainWindow, find_projects_file
+    from allocation.gui import (DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, SEVERITY_COLORS, MainWindow,
+                                SelectionDelegate, find_projects_file)
 
 
 @unittest.skipUnless(QApplication, 'PySide6가 설치되지 않아 GUI 테스트를 건너뜁니다.')
@@ -100,6 +101,7 @@ class GuiTests(unittest.TestCase):
 
         # 선택한 범위를 탭 구분 텍스트로 복사하고, 선택하지 않은 칸은 비운다.
         view = w.person_view
+        self.assertIsInstance(view.itemDelegate(), SelectionDelegate)
         select = QItemSelectionModel.SelectionFlag.Select
         view.selectionModel().select(view.model().index(0, 1), select)
         view.selectionModel().select(view.model().index(1, 2), select)
@@ -153,6 +155,38 @@ class GuiTests(unittest.TestCase):
         model = w.issue_view.model()
         self.assertEqual(model.data(model.index(0, 0), Qt.ForegroundRole), SEVERITY_COLORS['WARNING'])
         self.assertEqual(w.people_summary_view.model().rowCount(), 1)
+
+    def test_T29_font_size(self):
+        w = self.generated([project()], [person()])
+        self.assertEqual(DEFAULT_FONT_SIZE, 10)
+        self.assertEqual(w.font().pointSize(), DEFAULT_FONT_SIZE)
+        # 크기를 바꾸기 전에는 설정에 저장하지 않는다.
+        self.assertFalse(self.settings.contains('font_size'))
+        self.assertEqual(w.person_view.font().pointSize(), DEFAULT_FONT_SIZE)
+        height = w.person_view.verticalHeader().defaultSectionSize()
+        width = w.person_view.columnWidth(1)
+        w.change_font_size(1)
+        w.change_font_size(1)
+        self.assertEqual(w.person_view.font().pointSize(), DEFAULT_FONT_SIZE + 2)
+        # 행 높이와 열 너비가 새 글자 크기에 맞게 커진다.
+        self.assertGreater(w.person_view.verticalHeader().defaultSectionSize(), height)
+        self.assertGreater(w.person_view.columnWidth(1), width)
+        # 합계 행의 굵은 글꼴도 창 글자 크기를 따른다.
+        model = w.person_view.model()
+        bold = model.data(model.index(model.rowCount() - 1, 1), Qt.FontRole).resolve(w.person_view.font())
+        self.assertEqual((bold.pointSize(), bold.bold()), (DEFAULT_FONT_SIZE + 2, True))
+        # 바꾼 크기는 다음 창에 이어지고, 범위를 벗어나지 않으며, Ctrl+0으로 기본값이 된다.
+        self.assertEqual(self.window().font().pointSize(), DEFAULT_FONT_SIZE + 2)
+        for _ in range(30):
+            w.change_font_size(1)
+        self.assertEqual(w.font_size, MAX_FONT_SIZE)
+        for _ in range(30):
+            w.change_font_size(-1)
+        self.assertEqual(w.font_size, MIN_FONT_SIZE)
+        w.change_font_size(0)
+        self.assertEqual(w.font().pointSize(), DEFAULT_FONT_SIZE)
+        self.assertEqual([a.text() for a in w.menuBar().actions()[0].menu().actions()],
+                         ['글자 크게', '글자 작게', '기본 크기'])
 
     def test_T29_find_projects_file(self):
         p, h = self.write([project()], [person()])
