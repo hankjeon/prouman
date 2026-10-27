@@ -1,8 +1,8 @@
-# 인력할당 오프라인 CLI
+# 인력할당 오프라인 CLI·GUI
 
-사람별·사업별 연간 할당 목표를 월별로 배분하는 Python CLI다. 입력한 연간 목표를 유지하면서 월별 가용량, 휴직, 사업 기간, 제외 월, 사업별 연간 배정 상한을 검증한다. 오류가 있으면 최종 할당표를 출력하지 않는다.
+사람별·사업별 연간 할당 목표를 월별로 배분하는 Python CLI와 데스크톱 GUI다. 입력한 연간 목표를 유지하면서 월별 가용량, 휴직, 사업 기간, 제외 월, 사업별 연간 배정 상한을 검증한다. 오류가 있으면 최종 할당표를 출력하지 않는다.
 
-Python 3.10 이상과 PyYAML 6.0.3, 엑셀 저장용 openpyxl 3.1.5(의존성 et-xmlfile 2.0.0)를 사용한다. 이번 구현은 Python 3.12에서 검증했다. 실행 시 인터넷이나 서버는 필요하지 않다. GUI, 그래프, CSV 출력, 연간 목표 자동 결정은 후속 범위다.
+Python 3.10 이상과 PyYAML 6.0.3, 엑셀 저장용 openpyxl 3.1.5(의존성 et-xmlfile 2.0.0)를 사용한다. GUI는 PySide6-Essentials 6.12.0(의존성 shiboken6 6.12.0)을 추가로 사용한다. CLI는 Python 3.12, GUI는 Python 3.14·Windows 11에서 검증했다. 실행 시 인터넷이나 서버는 필요하지 않다. 그래프, CSV 출력, 연간 목표 자동 결정은 후속 범위다.
 
 ## 설치
 
@@ -27,6 +27,8 @@ python3 -m venv .venv
 ```
 
 Windows에서는 `python3` 대신 `python`, `.venv/bin/python` 대신 `.venv\Scripts\python.exe`를 사용한다. wheel은 환경에 맞게 다시 준비해야 하며 `.wheels`와 `.venv`는 Git에 포함하지 않는다.
+
+GUI도 쓰려면 위 명령의 `requirements.txt`를 `requirements-gui.txt`로 바꿔 설치한다. 이 파일은 CLI 의존성을 포함하며, 오프라인 wheel도 같은 방식으로 준비한다. CLI만 쓰는 환경에는 PySide6가 필요 없다.
 
 ## 실행
 
@@ -97,6 +99,36 @@ Linux에서는 같은 인자를 `./run.sh`에 전달한다. `--person`, `--proje
 
 수량은 표시 형식 `0.00000`의 숫자 셀이며 합계는 수식이 아닌 계산 값이다. `ERROR`가 있으면 파일을 만들지 않는다. 같은 이름의 파일은 덮어쓰며, 엑셀에서 열어 둔 파일은 저장에 실패하므로 닫고 다시 실행한다. 상세 규칙은 [요구사항](docs/requirements.md)에 있다.
 
+## GUI
+
+`requirements-gui.txt`로 설치한 뒤 저장소 루트에서 실행한다. 인자는 없다.
+
+```powershell
+.\run_gui.ps1
+```
+
+```bash
+./run_gui.sh
+```
+
+1. **사업 파일**과 **사람 파일**을 [찾기]로 고른다. 사람 파일을 고르면 같은 폴더나 바로 위 폴더의 `projects.yaml`을 사업 파일 칸에 자동으로 채운다(예: `myteam/people/people_2026.yaml` → `myteam/projects.yaml`). 사업 파일을 직접 골랐다면 바꾸지 않는다.
+2. **생성**을 누르면 계산 결과가 탭에 나온다.
+
+| 탭 | 내용 |
+| --- | --- |
+| 검증 | `ERROR`(붉은 글자)·`WARNING`(주황 글자) 목록 |
+| 요약 | 개인별·사업별 연간 요약 |
+| 개인상세 | 왼쪽 목록에서 사람을 고르면 사업·공백·합계의 1~12월·연간 표 |
+| 사업상세 | 사업별 배정·할당·잔여와 1~12월 할당 |
+
+- 그리드에서 셀을 골라 Ctrl+C를 누르면 탭으로 구분한 값이 복사되어 엑셀에 바로 붙일 수 있다.
+- **엑셀 저장**은 CLI의 `--excel`과 같은 파일을 만든다.
+- `ERROR`가 있으면 검증 탭만 보여 주고 엑셀 저장을 막는다.
+- 생성에 성공한 파일 경로는 기억해 두었다가 다음 실행 때 채운다.
+- CLI는 작업 디렉터리의 `projects.yaml`을 읽지만, GUI는 사업 파일 경로를 직접 고른다.
+
+Linux에서는 Qt 실행에 필요한 시스템 라이브러리(예: Debian/Ubuntu의 `libxkbcommon-x11-0`, `libxcb-cursor0`, `libegl1`)가 있어야 한다.
+
 ## 입력 템플릿
 
 [templates/README.md](templates/README.md)에 권장 폴더 구조와 실행 방법을 정리했다. `templates/`에는 기본 배분, 여러 사람·사업, 제외 월, 부분 사업 기간, 휴직, 윤년, 다년 사업, 공백 처리, 경고·오류 등 17개 사례의 주석 달린 YAML 예제가 있다. 각 사례 폴더를 작업 디렉터리로 사용하며, `errors/`의 입력은 의도적으로 실패하는 참고 자료다.
@@ -108,9 +140,12 @@ Linux에서는 같은 인자를 `./run.sh`에 전달한다. `--person`, `--proje
 - `src/allocation/models.py`: 입력·결과·진단 모델과 고정 소수 출력
 - `src/allocation/flow.py`: 정수 최대 흐름 및 균등 초안을 참고한 재배치
 - `src/allocation/engine.py`: 공백·허용 월 계산, 사전·사후 검증
-- `src/allocation/rendering.py`: 진단·요약·상세표 출력과 텍스트·엑셀 공용 집계
+- `src/allocation/rendering.py`: 진단·요약·상세표 출력과 공용 집계
+- `src/allocation/tables.py`: 엑셀과 GUI가 함께 쓰는 결과 표
 - `src/allocation/excel.py`: 엑셀(.xlsx) 저장
+- `src/gui.py`, `src/allocation/gui.py`: PySide6 GUI 진입점과 화면
 - `tests/test_allocation.py`: T01~T28, 경계 입력, 결정성, 완전 탐색 비교
+- `tests/test_gui.py`: T29 GUI 동작 (PySide6가 없으면 건너뜀)
 
 ## 테스트
 
@@ -118,7 +153,7 @@ Linux에서는 같은 인자를 `./run.sh`에 전달한다. `--person`, `--proje
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-표준 라이브러리 `unittest`를 사용한다. 모든 성공 fixture는 반복 실행과 YAML 항목 순서 변경 결과를 비교한다. 작은 정수 흐름 문제 200개는 완전 탐색과 비교하며, 외부 소켓을 금지한 상태에서 CLI도 검증한다. 테스트는 임시 YAML을 사용하고 예제 파일을 수정하지 않는다.
+표준 라이브러리 `unittest`를 사용한다. 모든 성공 fixture는 반복 실행과 YAML 항목 순서 변경 결과를 비교한다. 작은 정수 흐름 문제 200개는 완전 탐색과 비교하며, 외부 소켓을 금지한 상태에서 CLI도 검증한다. 테스트는 임시 YAML을 사용하고 예제 파일을 수정하지 않는다. GUI 테스트는 창을 띄우지 않는 `offscreen` 플랫폼에서 실행하며 사용자 설정(QSettings) 대신 임시 설정 파일을 쓴다.
 
 ## 요구사항 문서
 

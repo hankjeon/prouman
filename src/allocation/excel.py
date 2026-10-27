@@ -5,16 +5,19 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
-from .rendering import issue_counts, issue_sort_key, person_summary, person_table, project_summary
+from .rendering import issue_counts
+from .tables import (issue_table, people_summary_table, person_detail_table, project_detail_table,
+                     project_summary_table)
 
 NUMBER_FORMAT = '0.00000'
-MONTHS = [f'{m}월' for m in range(1, 13)]
 BOLD = Font(bold=True)
 
 
-def numbers(*units):
+def cell_value(value):
     # 0.00001 단위 정수를 float 없이 Decimal로 바꾼다. 셀에는 정확한 십진 문자열로 기록된다.
-    return [Decimal(value).scaleb(-5) for value in units]
+    if type(value) is int:
+        return Decimal(value).scaleb(-5)
+    return value if value != '' else None
 
 
 class Sheet:
@@ -28,6 +31,11 @@ class Sheet:
                 cell.number_format = NUMBER_FORMAT
             if bold:
                 cell.font = BOLD
+
+    def table(self, headers, rows, bold_label=None):
+        self.row(headers, bold=True)
+        for row in rows:
+            self.row([cell_value(value) for value in row], bold=row[0] == bold_label)
 
     def blank(self):
         self.sheet.append([None])
@@ -48,39 +56,25 @@ def write_workbook(result, path):
                          ('사람 파일', inputs.people_file), ('검증 결과', f'ERROR {errors}건 / WARNING {warnings}건')):
         check.row([label, value])
     check.blank()
-    check.row(['구분', '코드', '위치', '현재', '요구', '조치'], bold=True)
-    for issue in sorted(result.issues, key=issue_sort_key):
-        check.row([issue.severity, issue.code, issue.location, issue.current, issue.expected, issue.hint])
+    check.table(*issue_table(result.issues))
     check.widths(12, 8, 30, 40, 30, 40)
 
     summary = Sheet(book.create_sheet('요약'))
-    summary.row(['이름', '사업', '공백', '합계'], bold=True)
-    for name in result.allocations:
-        summary.row([name, *numbers(*person_summary(result, name))])
+    summary.table(*people_summary_table(result))
     summary.blank()
-    summary.row(['사업약칭', '사업명', '배정', '할당', '잔여', '비고'], bold=True)
-    for alias in inputs.projects:
-        item, limit, missing, totals = project_summary(result, alias)
-        summary.row([alias, item.name, *numbers(limit, sum(totals), limit - sum(totals)),
-                     '배정 미등록' if missing else None])
+    summary.table(*project_summary_table(result))
     summary.sheet.freeze_panes = 'B2'
     summary.widths(16, 32, 10, 10, 10, 12)
 
     people = Sheet(book.create_sheet('개인상세'))
     for name in inputs.people:
         people.row([name], bold=True)
-        people.row(['사업/구분', *MONTHS, '연간'], bold=True)
-        for label, values in person_table(result, name):
-            people.row([label, *numbers(*values, sum(values))], bold=label == '합계')
+        people.table(*person_detail_table(result, name), bold_label='합계')
         people.blank()
     people.widths(16, *[10] * 13)
 
     projects = Sheet(book.create_sheet('사업상세'))
-    projects.row(['사업약칭', '사업명', '배정', '할당', '잔여', '비고', *MONTHS], bold=True)
-    for alias in inputs.projects:
-        item, limit, missing, totals = project_summary(result, alias)
-        projects.row([alias, item.name, *numbers(limit, sum(totals), limit - sum(totals)),
-                      '배정 미등록' if missing else None, *numbers(*totals)])
+    projects.table(*project_detail_table(result))
     projects.sheet.freeze_panes = 'C2'
     projects.widths(16, 32, 10, 10, 10, 12, *[10] * 12)
 
