@@ -6,7 +6,7 @@
 
 코드 작성 전 `README.md` → `docs/requirements.md` → `docs/data-model.md` → `docs/allocation-algorithm.md` → `docs/validation.md` → `docs/test-cases.md` 순서로 읽는다. 과거 예시의 월별 직접 입력, 사업 기간 일수 비례 계산, 개인별 `yearly` 묶음, 사업 배정인력 완전 소진은 최종 규칙이 아니다.
 
-1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. 엑셀(.xlsx) 저장(`--excel`)과 PySide6 데스크톱 GUI(`src/allocation/gui.py`)는 1차 범위다. GUI는 계산 엔진과 공용 표(`tables.py`)를 재사용하고 계산 규칙을 따로 두지 않는다. 그래프, CSV 출력, exe 패키징 및 사업 우선순위 기반 연간 목표 자동 생성은 2차 이후다.
+1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. 엑셀(.xlsx) 저장(`--excel`)과 PySide6 데스크톱 GUI(`src/allocation/gui.py`)는 1차 범위다. GUI는 계산 엔진과 공용 표(`tables.py`)를 재사용하고 계산 규칙을 따로 두지 않는다. GUI 입력 편집기(`document.py`, `editor.py`)는 편집 내용을 YAML로 만들어 `load_inputs`로 검증하며, 입력 중 안내 외의 검증 규칙을 새로 만들지 않는다. 그래프, CSV 출력, exe 패키징 및 사업 우선순위 기반 연간 목표 자동 생성은 2차 이후다.
 
 ## 필수 구현 원칙
 

@@ -23,6 +23,7 @@ class Missing:
 
 
 MISSING = Missing()
+QUANTITY_PATTERN = re.compile(r'[0-9]+(?:\.[0-9]{1,5})?')
 
 
 def parse_date(value):
@@ -82,9 +83,10 @@ class Validator:
     def warning(self, code, where, value, expected, hint):
         self.issues.append(Issue('WARNING', code, where, repr(value), expected, hint))
 
-    def read(self, path):
+    def read(self, path, text=None):
+        # text를 주면 파일 대신 그 내용을 같은 규칙으로 검증한다(GUI 편집 중인 내용). path는 위치 표시에 쓴다.
         try:
-            stream = io.StringIO(decode_text(Path(path).read_bytes()))
+            stream = io.StringIO(decode_text(Path(path).read_bytes()) if text is None else text)
             stream.name = str(path)  # YAML 오류 위치에 파일 경로를 표시한다.
             loader = Loader(stream)
             try:
@@ -136,7 +138,7 @@ class Validator:
 
     def quantity(self, value, where):
         if (not (type(value) is str or isinstance(value, Number) and value.kind in ('int', 'float'))
-                or not re.fullmatch(r'[0-9]+(?:\.[0-9]{1,5})?', value)):
+                or not QUANTITY_PATTERN.fullmatch(value)):
             self.error('E005', where, value, '소수 5자리 이하의 비음수 십진수 (지수 표기 불가)')
             return None
         with localcontext() as context:
@@ -234,10 +236,12 @@ class Validator:
         return year, dict(sorted(people.items()))
 
 
-def load_inputs(project_file='projects.yaml', people_file=None):
+def load_inputs(project_file='projects.yaml', people_file=None, texts=None):
+    """texts={'projects': ..., 'people': ...}를 주면 파일 대신 그 YAML 문자열을 검증한다."""
+    texts = texts or {}
     validator = Validator()
-    projects = validator.projects(validator.read(project_file), str(project_file))
-    year, people = validator.people(validator.read(people_file), str(people_file), projects)
+    projects = validator.projects(validator.read(project_file, texts.get('projects')), str(project_file))
+    year, people = validator.people(validator.read(people_file, texts.get('people')), str(people_file), projects)
     inputs = None
     if not any(issue.severity == 'ERROR' for issue in validator.issues):
         inputs = Inputs(year, projects, people, str(project_file), str(people_file))

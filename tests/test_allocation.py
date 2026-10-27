@@ -461,6 +461,60 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIsNone(inputs)
         self.assertIn('E001', [i.code for i in issues])
 
+    def test_T30_editor_document_round_trip(self):
+        # GUI 편집기 형식으로 읽고 다시 쓴 YAML이 원본과 같은 입력·결과·진단을 만든다. 저장소 예제는 읽기만 한다.
+        from allocation.document import dump_people, dump_projects, read_people, read_projects
+        from allocation.loading import decode_text
+        folders = [ROOT / 'myteam', *sorted((ROOT / 'templates').glob('[0-9]*')),
+                   *sorted((ROOT / 'templates' / 'errors').glob('[0-9]*'))]
+        checked = 0
+        for folder in folders:
+            p = folder / 'projects.yaml'
+            for h in sorted((folder / 'people').glob('*.yaml')):
+                with self.subTest(people=str(h.relative_to(ROOT))):
+                    projects, dropped = read_projects(decode_text(p.read_bytes()))
+                    doc, dropped_people = read_people(decode_text(h.read_bytes()))
+                    texts = {'projects': dump_projects(projects), 'people': dump_people(doc)}
+                    a, a_issues = load_inputs(p, h)
+                    b, b_issues = load_inputs(p, h, texts)
+                    if dropped or dropped_people:
+                        # 중복 키·미지원 필드는 편집기가 버리고 사용자에게 알린다.
+                        self.assertIn(folder.name, ('15_duplicate_yaml_key', '16_invalid_fields'))
+                        continue
+                    self.assertEqual(a, b)
+                    if a is None:
+                        self.assertEqual(sorted(i.code for i in a_issues), sorted(i.code for i in b_issues))
+                        continue
+                    ra, rb = calculate(a, a_issues), calculate(b, b_issues)
+                    self.assertEqual((ra.allocations, ra.issues), (rb.allocations, rb.issues))
+                    checked += 1
+        self.assertGreaterEqual(checked, 15)
+
+    def test_T30_editor_document_values(self):
+        from allocation.document import (PeopleDoc, PersonEntry, ProjectEntry, YearEntry, dump_people,
+                                         dump_projects, person_totals, quantity_units, read_people, read_projects)
+        # 따옴표·콜론·# 이 든 이름도 안전하게 쓰고, 숫자처럼 보이는 값은 문자열로 남겨 원문 그대로 검증받는다.
+        projects = [ProjectEntry('연구: "1차" #A', 'A1', '2026.1.1.', '2026-12-31', [YearEntry('2026', '1.5', '4 5,6')])]
+        text = dump_projects(projects)
+        again, dropped = read_projects(text)
+        self.assertEqual((again, dropped), ([ProjectEntry('연구: "1차" #A', 'A1', '2026.1.1.', '2026-12-31',
+                                                          [YearEntry('2026', '1.5', '4, 5, 6')])], []))
+        doc = PeopleDoc('2026', [PersonEntry('김 철수', {'A1': '1', 'B': ''})])
+        self.assertNotIn('"B"', dump_people(doc))
+        self.assertEqual(read_people(dump_people(doc))[0].people[0].allocations, {'A1': '1'})
+        inputs, issues = load_inputs('p.yaml', 'h.yaml', {'projects': text, 'people': dump_people(doc)})
+        self.assertIsNotNone(inputs, issues)
+        self.assertEqual(inputs.projects['A1'].yearly[2026].excluded, frozenset({4, 5, 6}))
+        # 잘못된 연도·월은 문자열로 써서 파일 입력과 같은 오류 코드를 받는다.
+        bad = [ProjectEntry('X', 'X', '2026-01-01', '2026-12-31', [YearEntry('20x6', '1', '4월')])]
+        _, issues = load_inputs('p.yaml', 'h.yaml', {'projects': dump_projects(bad), 'people': dump_people(doc)})
+        self.assertIn('E003', [i.code for i in issues])
+        self.assertEqual([quantity_units(v) for v in ('1', '0.5', '0.00001', '1e0', '-1', '0.123456', '')],
+                         [100000, 50000, 1, None, None, None, None])
+        self.assertEqual(person_totals(PersonEntry('a', {'A1': '0.6', 'B': '0.4'}), '2026'), (100000, 0))
+        self.assertEqual(person_totals(PersonEntry('a', {'A1': 'x'}), '2026'), (None, 0))
+        self.assertEqual(person_totals(PersonEntry('a', {'A1': '1'}), 'abc'), (100000, None))
+
     def test_T28_excel_output(self):
         # 사업1의 제외 월 4월 중복으로 W001 경고 1건이 생긴다.
         paths = self.write([project(excluded=[4, 4]), project('사업2')],
