@@ -12,7 +12,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 try:
     from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
     from PySide6.QtGui import QGuiApplication
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QComboBox
 except ImportError:
     QApplication = None
 
@@ -80,7 +80,7 @@ class GuiTests(unittest.TestCase):
     def test_T29_generate_views_copy_excel_and_settings(self):
         w = self.generated([project(), project('사업2')],
                            [person({'사업1': '0.60000', '사업2': '0.40000'}), person({'사업2': '1'}, name='김철수')])
-        self.assertEqual([w.input_tabs.tabText(i) for i in range(w.input_tabs.count())], ['사업 입력', '사람 입력'])
+        self.assertEqual([w.input_tabs.tabText(i) for i in range(w.input_tabs.count())], ['사업 입력', '사람 입력', '종합'])
         self.assertEqual([w.result_tabs.tabText(i) for i in range(w.result_tabs.count())],
                          ['검증', '요약', '개인상세', '사업상세'])
         self.assertEqual(w.pages.currentIndex(), w.RESULT_PAGE)
@@ -211,49 +211,78 @@ class GuiTests(unittest.TestCase):
     # --- T30 입력 편집기 ---
 
     def matrix_texts(self, w):
-        m = w.people_editor.matrix
+        # 종합 탭(읽기 전용 사람 × 사업 표)
+        m = w.people_editor.overview.matrix
         return [[m.item(r, c).text() for c in range(m.columnCount())] for r in range(m.rowCount())]
+
+    def alloc_texts(self, w):
+        # 사람 입력 탭에서 고른 사람의 참여 사업 표: 사업, 참여율, 사업명
+        a = w.people_editor.allocations
+        return [[a.item(r, c).text() for c in range(a.columnCount())] for r in range(a.rowCount())]
 
     def test_T30_edit_tables_and_generate_unsaved(self):
         p, h = self.write([project(), project('사업2')], [person({'사업1': '0.60000', '사업2': '0.40000'})])
         w = self.window()
         w.choose_people(str(h))
-        editor, matrix = w.people_editor, w.people_editor.matrix
+        editor, alloc, matrix = w.people_editor, w.people_editor.allocations, w.people_editor.overview.matrix
         self.assertEqual([w.project_editor.table.item(0, c).text() for c in range(4)],
                          ['사업1', '사업1', '2027-01-01', '2027-12-31'])
         self.assertEqual([matrix.horizontalHeaderItem(c).text() for c in range(matrix.columnCount())],
                          ['이름', '사업1', '사업2', '사업 합계', '공백', '합계'])
         self.assertEqual(self.matrix_texts(w), [['홍길동', '0.60000', '0.40000', '1.00000', '0.00000', '1.00000']])
+        self.assertEqual(self.alloc_texts(w), [['사업1', '0.60000', '사업1'], ['사업2', '0.40000', '사업2']])
         self.assertEqual(editor.year_edit.text(), '2027')
 
-        # 셀을 고치면 합계가 바로 바뀌고 1이 아니면 표시한다. 저장 전이어도 생성은 화면 내용으로 계산한다.
-        matrix.item(0, 1).setText('0.5')
+        # 참여율을 고치면 합계가 바로 바뀌고 1이 아니면 표시한다. 저장 전이어도 생성은 화면 내용으로 계산한다.
+        alloc.item(0, 1).setText('0.5')
         self.assertEqual(editor.doc.people[0].allocations['사업1'], '0.5')
         self.assertEqual(self.matrix_texts(w)[0][3:], ['0.90000', '0.00000', '0.90000'])
         self.assertTrue(matrix.item(0, 5).toolTip())
+        self.assertIn('⚠', editor.totals.text())
+        self.assertTrue(editor.people_list.item(0).toolTip())
         self.assertEqual(w.input_tabs.tabText(w.PEOPLE_TAB), '사람 입력 *')
         w.generate()
         self.assertIn('E101', [row[1] for row in self.texts(w.issue_view)])
-        matrix.item(0, 2).setText('0.5')
+        alloc.item(1, 1).setText('0.5')
         self.assertEqual(matrix.item(0, 5).toolTip(), '')
+        self.assertNotIn('⚠', editor.totals.text())
+        self.assertEqual(editor.people_list.item(0).toolTip(), '')
         w.generate()
         self.assertTrue(w.excel_button.isEnabled())
         self.assertIn('0.60000', h.read_text(encoding='utf-8'))  # 저장하기 전에는 파일이 그대로다.
 
-        # 형식이 틀린 값은 칸을 표시하고 안내를 띄운다. 빈 칸은 할당 없음이다.
-        matrix.item(0, 1).setText('0.5.1')
-        self.assertTrue(matrix.item(0, 1).toolTip())
+        # 형식이 틀린 값은 칸을 표시하고 안내를 띄운다. 빈 참여율도 안내하고, 행 삭제로 사업을 뺀다.
+        alloc.item(0, 1).setText('0.5.1')
+        self.assertTrue(alloc.item(0, 1).toolTip())
         self.assertEqual(self.matrix_texts(w)[0][3], '?')
-        matrix.item(0, 1).setText('')
-        self.assertNotIn('사업1', editor.doc.people[0].allocations)
+        alloc.item(0, 1).setText('')
+        self.assertIn('참여율을 입력하세요', alloc.item(0, 1).toolTip())
+        alloc.setCurrentCell(0, 0)
+        editor.remove_row()
+        self.assertEqual(editor.doc.people[0].allocations, {'사업2': '0.5'})
 
-        # 엑셀 범위 붙여넣기: 현재 칸부터 채우고 표 밖·계산 칸은 건너뛴다.
-        matrix.setCurrentCell(0, 1)
-        matrix.paste('0.25\t0.75\t9\n1\t1')
-        self.assertEqual(self.matrix_texts(w)[0][1:6], ['0.25', '0.75', '1.00000', '0.00000', '1.00000'])
-        matrix.setCurrentCell(0, 1)
-        matrix.selectRow(0)
-        self.assertTrue(matrix.copy_selection().startswith('홍길동\t0.25\t0.75'))
+        # 행 추가 → 사업 고르기(드롭다운은 이 사람이 이미 고른 사업을 빼고 잔여 배정을 보인다) → 붙여넣기.
+        editor.add_row()
+        self.assertEqual(list(editor.doc.people[0].allocations), ['사업2', ''])
+        self.assertIn('사업을 고르세요', alloc.item(1, 0).toolTip())
+        self.assertEqual(editor.choices(1), [('사업1', '사업1 — 사업1 (잔여 10.00000)')])
+        alloc.item(1, 0).setText('사업1')
+        self.assertEqual(list(editor.doc.people[0].allocations), ['사업2', '사업1'])
+        alloc.item(1, 0).setText('사업2')  # 같은 사업은 한 사람에게 두 번 넣을 수 없다.
+        self.assertIn('이미 있습니다', editor.message.text())
+        self.assertEqual(list(editor.doc.people[0].allocations), ['사업2', '사업1'])
+        alloc.setCurrentCell(0, 1)
+        alloc.paste('0.25\n0.75\n9')
+        self.assertEqual(self.alloc_texts(w), [['사업2', '0.25', '사업2'], ['사업1', '0.75', '사업1']])
+        self.assertEqual(self.matrix_texts(w)[0][1:6], ['0.75', '0.25', '1.00000', '0.00000', '1.00000'])
+        alloc.clearSelection()
+        alloc.selectRow(0)
+        self.assertEqual(alloc.copy_selection(), '사업2\t0.25\t사업2')
+        # 종합 탭은 읽기 전용이고, 행을 두 번 누르면 그 사람의 입력 화면으로 간다.
+        self.assertFalse(matrix.item(0, 1).flags() & Qt.ItemIsEditable)
+        w.input_tabs.setCurrentIndex(w.OVERVIEW_TAB)
+        matrix.cellDoubleClicked.emit(0, 1)
+        self.assertEqual(w.input_tabs.currentIndex(), w.PEOPLE_TAB)
 
     def test_T30_absences_and_year(self):
         _, h = self.write([project(year=2026)], [person({'사업1': '0.95430'})], year=2026)
@@ -327,15 +356,17 @@ class GuiTests(unittest.TestCase):
         w.choose_people(str(h))
         self.assertEqual(self.warnings[-1][0], '지원하지 않는 항목')
         self.assertIn('projects[0].id', self.warnings[-1][1])
-        headers = [w.people_editor.matrix.horizontalHeaderItem(c).text() for c in range(3)]
+        matrix = w.people_editor.overview.matrix
+        headers = [matrix.horizontalHeaderItem(c).text() for c in range(3)]
         self.assertEqual(headers, ['이름', '사업1', '없는사업 (미등록)'])
-        self.assertTrue(w.people_editor.matrix.item(0, 2).toolTip())
+        self.assertTrue(matrix.item(0, 2).toolTip())
+        self.assertIn('사업 목록에 없는 약칭', w.people_editor.allocations.item(1, 0).toolTip())
         w.generate()
         self.assertIn('E007', [row[1] for row in self.texts(w.issue_view)])
-        # 값을 지우면 미등록 열이 사라진다.
-        w.people_editor.matrix.item(0, 2).setText('')
-        w.people_editor.refresh()
-        self.assertEqual(w.people_editor.matrix.columnCount(), 5)
+        # 그 행을 지우면 미등록 열이 사라진다.
+        w.people_editor.allocations.setCurrentCell(1, 0)
+        w.people_editor.remove_row()
+        self.assertEqual(matrix.columnCount(), 5)
 
     def test_T30_save_backup_and_new_documents(self):
         p, h = self.write([project()], [person()])
@@ -363,8 +394,13 @@ class GuiTests(unittest.TestCase):
         pe.grid.item(0, 1).setText('2')  # 관리 연도 2026 → 2025~2029의 두 번째 열
         me.year_edited('2026')
         me.add_person()
-        me.matrix.item(0, 0).setText('이영희')
-        me.matrix.item(0, 1).setText('1')
+        self.assertEqual(me.doc.people[0].name, '새 사람')
+        me.people_list.item(0).setText('이영희')
+        self.assertEqual(me.doc.people[0].name, '이영희')
+        me.add_row()
+        self.assertEqual([alias for alias, _ in me.choices(0)], ['새사업'])
+        me.allocations.item(0, 0).setText('새사업')
+        me.allocations.item(0, 1).setText('1')
         w.generate()
         self.assertTrue(w.excel_button.isEnabled(), self.texts(w.issue_view))
         folder = self.path / 'new'
@@ -377,7 +413,7 @@ class GuiTests(unittest.TestCase):
         self.assertFalse((folder / 'projects.yaml.bak').exists())
 
         # 저장하지 않은 변경이 있으면 다른 파일을 열기 전에 묻는다.
-        me.matrix.item(0, 1).setText('0.9')
+        me.allocations.item(0, 1).setText('0.9')
         self.save_answers = ['cancel']
         w.choose_people(str(h))
         self.assertEqual(w.people_edit.text(), str(folder / 'people_2026.yaml'))
@@ -406,7 +442,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual((w.pages.currentIndex(), w.result_stack.currentIndex()), (w.RESULT_PAGE, 1))
         self.assertTrue(w.stale_bar.isHidden())
         # 생성 뒤 입력을 고치면 결과가 예전 입력 기준임을 알린다. 메뉴에도 저장 안 한 표시가 붙는다.
-        w.people_editor.matrix.item(0, 1).setText('0.5')
+        w.people_editor.allocations.item(0, 1).setText('0.5')
         self.assertFalse(w.stale_bar.isHidden())
         self.assertIn('생성한 입력 기준', w.stale_label.text())
         self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력 *')
@@ -418,7 +454,7 @@ class GuiTests(unittest.TestCase):
         self.assertIn('입력 화면에서 고친 뒤 다시 생성하세요', w.result_header.text())
         self.assertFalse(w.excel_button.isEnabled())
         # 저장하면 메뉴 표시가 사라지고, 결과는 그대로라 안내도 생기지 않는다.
-        w.people_editor.matrix.item(0, 1).setText('1')
+        w.people_editor.allocations.item(0, 1).setText('1')
         w.generate()
         self.assertTrue(w.save('people'))
         self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력')
@@ -564,6 +600,60 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.project_editor.table.item(0, w.project_editor.TOTAL).text(), '11.00000')
         w.generate()
         self.assertIn('E003', [row[1] for row in self.texts(w.issue_view)])
+
+    # --- T33 사람별 입력 ---
+
+    def test_T33_people_list_and_project_choices(self):
+        projects = [project('운영'), project('연구', period='2026-01-01~2026-12-31'), project('예산없음')]
+        projects[2]['yearly'] = {2028: {'allocated_manpower': '1'}}
+        _, h = self.write(projects, [person({'운영': '0.7', '연구': '0.3'}),
+                                     person({'운영': '1'}, name='김철수')])
+        w = self.window()
+        w.choose_people(str(h))
+        editor = w.people_editor
+        self.assertEqual([editor.people_list.item(i).text() for i in range(editor.people_list.count())],
+                         ['홍길동', '김철수'])
+        self.assertEqual(editor.title.text(), '홍길동의 참여 사업')
+        # 관리 연도(2027) 배정이 없거나 사업 기간이 그 해가 아닌 사업은 드롭다운에 나오지 않는다.
+        self.assertEqual([alias for alias, _ in editor.choices(0)], ['운영'])
+        self.assertIn('배정이 없거나 사업 기간이 아닌 사업', editor.allocations.item(1, 0).toolTip())
+        self.assertTrue(editor.people_list.item(0).toolTip())  # 문제가 있는 사람은 목록에서 표시
+        # 잔여 배정 = 배정 10 - (0.7 + 1)
+        self.assertIn('잔여 8.30000', editor.choices(0)[0][1])
+        # 드롭다운 편집기는 고를 수 있는 사업을 약칭 값으로 담는다.
+        combo = editor.allocations.itemDelegateForColumn(editor.PROJECT).createEditor(
+            editor.allocations.viewport(), None, editor.allocations.model().index(0, 0))
+        self.assertIsInstance(combo, QComboBox)
+        self.assertEqual([combo.itemData(i) for i in range(combo.count())], ['운영'])
+        combo.deleteLater()
+
+        # 이름: 비어 있거나 다른 사람과 같으면 받지 않고 원래 이름으로 돌린다.
+        editor.people_list.item(1).setText('홍길동')
+        self.assertEqual(editor.doc.people[1].name, '김철수')
+        self.assertEqual(editor.people_list.item(1).text(), '김철수')
+        self.assertIn('이미 있는 이름', editor.message.text())
+        editor.people_list.item(1).setText('  ')
+        self.assertEqual(editor.doc.people[1].name, '김철수')
+        editor.people_list.item(1).setText('김영희')
+        self.assertEqual(editor.doc.people[1].name, '김영희')
+        self.assertEqual(editor.message.text(), '')
+        # 새 사람은 겹치지 않는 이름으로 추가된다.
+        editor.add_person()
+        editor.add_person()
+        self.assertEqual([p.name for p in editor.doc.people][2:], ['새 사람', '새 사람 2'])
+        self.assertEqual(editor.people_list.currentRow(), 3)
+        editor.remove_person()
+        self.assertEqual(len(editor.doc.people), 3)
+        self.assertEqual(w.people_editor.overview.matrix.rowCount(), 3)
+
+        # 휴직은 고른 사람에게만 들어간다.
+        editor.select_person(1)
+        editor.add_absence()
+        editor.absences.item(0, 0).setText('2027-01-01')
+        editor.absences.item(0, 1).setText('2027-12-31')
+        self.assertEqual(len(editor.doc.people[1].absences), 1)
+        self.assertEqual(editor.doc.people[0].absences, [])
+        self.assertIn('공백 1.00000', editor.totals.text())
 
     def test_T29_find_projects_file(self):
         p, h = self.write([project()], [person()])

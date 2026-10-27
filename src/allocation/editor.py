@@ -3,10 +3,10 @@ from datetime import date
 
 from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QDateEdit, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QPushButton, QSizePolicy, QSplitter, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSplitter, QStyle,
+                               QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from .document import (QUANTITY_HINT, AbsenceEntry, PeopleDoc, PersonEntry, ProjectEntry, YearEntry,
                        absence_problems, person_totals, project_problems, quantity_units, to_date, valid_year,
@@ -517,118 +517,208 @@ class ProjectEditor(QWidget):
             QTimer.singleShot(0, self.sync_headers)
 
 
+def rename_key(mapping, old, new):
+    """순서를 유지하며 키 이름을 바꾼 새 dict."""
+    return {new if key == old else key: value for key, value in mapping.items()}
+
+
+class ProjectDelegate(SelectionDelegate):
+    """참여 사업 칸에서 고를 수 있는 사업을 드롭다운으로 보여 준다. 값은 사업약칭으로 저장한다."""
+
+    def __init__(self, view, choices):
+        super().__init__(view)
+        self.choices = choices  # 행 번호 → [(약칭, 표시 문구)]
+
+    def createEditor(self, parent, option, index):
+        editor = QComboBox(parent)
+        for alias, label in self.choices(index.row()):
+            editor.addItem(label, alias)
+        QTimer.singleShot(0, editor, editor.showPopup)  # 칸을 열면 바로 목록을 펼친다(편집기가 닫히면 취소).
+        return editor
+
+    def setEditorData(self, editor, index):
+        position = editor.findData(index.data() or '')
+        editor.setCurrentIndex(max(position, 0))
+
+    def setModelData(self, editor, model, index):
+        if editor.currentIndex() >= 0:
+            model.setData(index, editor.currentData())
+
+
 class PeopleEditor(QWidget):
-    """관리 연도, 사람 × 사업 참여율 행렬, 선택한 사람의 휴직 기간."""
+    """관리 연도, 왼쪽 사람 목록, 오른쪽 고른 사람의 참여 사업·참여율과 휴직 기간."""
 
     changed = Signal()
     year_changed = Signal()
+    PROJECT, RATE, PROJECT_NAME = 0, 1, 2  # 사업명은 계산 칸이라 맨 끝에 두어 엑셀의 (사업, 참여율) 붙여넣기를 막지 않는다.
 
     def __init__(self, projects):
         super().__init__()
         self.projects = projects  # 사업 편집기의 현재 목록을 돌려주는 함수
         self.doc = PeopleDoc()
-        self.columns = []  # (약칭, 사업 목록에 있는지)
         self.year_edit = QLineEdit()
         self.year_edit.setMaximumWidth(120)
         self.year_edit.textEdited.connect(self.year_edited)
-        self.matrix = EditTable()
-        self.matrix.itemChanged.connect(self.matrix_edited)
-        self.matrix.currentCellChanged.connect(lambda *args: self.show_absences())
+
+        self.people_list = QListWidget()
+        self.people_list.currentRowChanged.connect(lambda row: self.show_person())
+        self.people_list.itemChanged.connect(self.name_edited)
+        self.add_button, self.remove_button = QPushButton('사람 추가'), QPushButton('사람 삭제')
+        self.add_button.clicked.connect(self.add_person)
+        self.remove_button.clicked.connect(self.remove_person)
+        self.message = QLabel()
+        self.message.setStyleSheet('color: #c62828;')
+        self.message.setWordWrap(True)
+        left = titled('사람 (이름을 두 번 눌러 바꿉니다)', self.people_list,
+                      button_row(self.add_button, self.remove_button), self.message)
+
+        self.title = QLabel()
+        self.allocations = EditTable(['사업', '참여율', '사업명'], stretch_last=True)
+        self.allocations.setItemDelegateForColumn(self.PROJECT, ProjectDelegate(self.allocations, self.choices))
+        self.allocations.itemChanged.connect(self.allocation_edited)
+        self.totals = QLabel()
+        self.add_row_button, self.remove_row_button = QPushButton('행 추가'), QPushButton('행 삭제')
+        self.add_row_button.clicked.connect(self.add_row)
+        self.remove_row_button.clicked.connect(self.remove_row)
         self.absences = EditTable(['시작일', '종료일', '사유'], stretch_last=True)
         self.absences.set_date_columns(0, 1)
         self.absences.itemChanged.connect(self.absence_edited)
-        self.add_button, self.remove_button = QPushButton('사람 추가'), QPushButton('사람 삭제')
         self.add_absence_button, self.remove_absence_button = QPushButton('휴직 추가'), QPushButton('휴직 삭제')
-        self.add_button.clicked.connect(self.add_person)
-        self.remove_button.clicked.connect(self.remove_person)
         self.add_absence_button.clicked.connect(self.add_absence)
         self.remove_absence_button.clicked.connect(self.remove_absence)
-        self.absences_title = QLabel()
+        right = QSplitter(Qt.Vertical)
+        right.addWidget(titled(self.title, self.allocations, self.totals,
+                               button_row(self.add_row_button, self.remove_row_button)))
+        right.addWidget(titled('휴직 기간', self.absences,
+                               button_row(self.add_absence_button, self.remove_absence_button)))
+        right.setSizes([450, 250])
 
         year_row = QHBoxLayout()
         year_row.addWidget(QLabel('관리 연도'))
         year_row.addWidget(self.year_edit)
-        year_row.addWidget(QLabel('참여율은 사람마다 사업 합계 + 공백(휴직) = 1.00000이 되도록 입력합니다. '
-                                  '엑셀에서 복사한 범위를 Ctrl+V로 붙여 넣을 수 있습니다.'))
+        year_row.addWidget(QLabel('사람마다 사업 합계 + 공백(휴직) = 1.00000이 되도록 참여율을 입력합니다. '
+                                  '사업은 관리 연도에 배정이 있는 사업에서 고릅니다.'))
         year_row.addStretch()
-        split = QSplitter(Qt.Vertical)
-        split.addWidget(titled('사람별 사업 참여율', self.matrix, button_row(self.add_button, self.remove_button)))
-        split.addWidget(titled(self.absences_title, self.absences,
-                               button_row(self.add_absence_button, self.remove_absence_button)))
-        split.setSizes([500, 200])
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setSizes([260, 940])
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(year_row)
         layout.addWidget(split)
+        self.overview = PeopleOverview(self)
         self.refresh()
+
+    # --- 문서 ---
 
     def set_doc(self, doc):
         self.doc = doc
         self.year_edit.setText(doc.year)
         self.refresh()
         if doc.people:
-            self.matrix.setCurrentCell(0, 0)
+            self.people_list.setCurrentRow(0)
 
     def current(self):
-        row = self.matrix.currentRow()
+        row = self.people_list.currentRow()
         return self.doc.people[row] if 0 <= row < len(self.doc.people) else None
 
+    def select_person(self, row):
+        self.people_list.setCurrentRow(row)
+
     def refresh(self):
-        """사업 목록이 바뀌면 열을 다시 만든다. 사업 목록에 없는 약칭도 값이 남아 있으면 열로 보여 준다."""
-        known = list(dict.fromkeys(p.alias.strip() for p in self.projects() if p.alias.strip()))
-        used = {alias for person in self.doc.people for alias, value in person.allocations.items() if value}
-        self.columns = [(alias, True) for alias in known] + [(alias, False) for alias in sorted(used - set(known))]
-        names = {p.alias.strip(): p.name for p in self.projects()}
-        headers = ['이름'] + [alias if ok else f'{alias} (미등록)' for alias, ok in self.columns]
-        self.matrix.blockSignals(True)
-        self.matrix.setColumnCount(len(headers) + 3)
-        self.matrix.setHorizontalHeaderLabels(headers + ['사업 합계', '공백', '합계'])
-        for column, (alias, ok) in enumerate(self.columns, 1):
-            self.matrix.horizontalHeaderItem(column).setToolTip(names.get(alias, '사업 목록에 없는 약칭입니다.'))
-        self.matrix.setRowCount(len(self.doc.people))
-        for row, person in enumerate(self.doc.people):
-            self.matrix.set_cell(row, 0, person.name)
-            for column, (alias, ok) in enumerate(self.columns, 1):
-                self.matrix.set_cell(row, column, person.allocations.get(alias, ''))
-            for column in range(len(self.columns) + 1, len(headers) + 3):
-                self.matrix.set_cell(row, column, '', editable=False, computed=True)
-        self.matrix.blockSignals(False)
-        for row in range(len(self.doc.people)):
-            self.update_row(row)
-        self.matrix.resizeColumnsToContents()
+        """사업 목록·관리 연도가 바뀌거나 문서를 바꿀 때 전체를 다시 그린다."""
+        row = self.people_list.currentRow()
+        self.people_list.blockSignals(True)
+        self.people_list.clear()
+        for person in self.doc.people:
+            item = QListWidgetItem(person.name)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.people_list.addItem(item)
+        self.people_list.blockSignals(False)
+        for index in range(len(self.doc.people)):
+            self.mark_person(index)
+        if self.doc.people:
+            self.people_list.setCurrentRow(min(max(row, 0), len(self.doc.people) - 1))
         self.remove_button.setEnabled(bool(self.doc.people))
         self.mark_year()
-        self.show_absences()
+        self.show_person()
+        self.overview.refresh()
 
-    def update_row(self, row):
-        """행의 입력 확인 표시와 합계 칸을 다시 계산한다."""
-        person = self.doc.people[row]
-        self.matrix.blockSignals(True)
+    def notify(self):
+        self.overview.refresh()
+        self.changed.emit()
+
+    # --- 사람 목록 ---
+
+    def name_problem(self, person):
         if not person.name.strip():
-            name_problem = '이름을 입력하세요.'
-        elif [p.name for p in self.doc.people].count(person.name) > 1:
-            name_problem = '같은 이름이 이미 있습니다.'
-        else:
-            name_problem = ''
-        self.matrix.mark(row, 0, name_problem)
-        for column, (alias, ok) in enumerate(self.columns, 1):
-            value = person.allocations.get(alias, '')
-            problem = QUANTITY_HINT if value and quantity_units(value) is None else ''
-            if value and not ok:
-                problem = problem or '사업 목록에 없는 약칭입니다. 사업 입력 탭에서 추가하거나 값을 지우세요.'
-            self.matrix.mark(row, column, problem)
+            return '이름을 입력하세요.'
+        if [p.name for p in self.doc.people].count(person.name) > 1:
+            return '같은 이름이 이미 있습니다.'
+        return ''
+
+    def total_problem(self, person):
         targets, absence = person_totals(person, self.doc.year)
-        base = len(self.columns) + 1
-        texts = [amount(targets) if targets is not None else '?', amount(absence) if absence is not None else '?']
-        total = targets + absence if targets is not None and absence is not None else None
-        texts.append(amount(total) if total is not None else '?')
-        for offset, text in enumerate(texts):
-            self.matrix.item(row, base + offset).setText(text)
-        problem = '' if total == 100000 else f'사업 합계 + 공백이 1.00000이어야 합니다 (현재 {texts[2]}).'
-        item = self.matrix.item(row, base + 2)
-        item.setBackground(PROBLEM_COLOR if problem else COMPUTED_COLOR)
+        if targets is None or absence is None:
+            return '참여율이나 휴직 기간 형식을 확인하세요.'
+        if targets + absence != 100000:
+            return f'사업 합계 + 공백이 1.00000이어야 합니다 (현재 {amount(targets + absence)}).'
+        return ''
+
+    def mark_person(self, index):
+        """합계가 맞지 않거나 이름에 문제가 있는 사람은 목록에서 붉게 표시한다."""
+        person, item = self.doc.people[index], self.people_list.item(index)
+        problem = self.name_problem(person) or self.total_problem(person) or self.row_problem(person)
+        self.people_list.blockSignals(True)
+        item.setForeground(QColor('#c62828') if problem else QColor('#000000'))
         item.setToolTip(problem)
-        self.matrix.blockSignals(False)
+        self.people_list.blockSignals(False)
+
+    def unique_name(self):
+        names = {p.name for p in self.doc.people}
+        return next(name for n in range(1, len(names) + 2)
+                    if (name := '새 사람' if n == 1 else f'새 사람 {n}') not in names)
+
+    def add_person(self):
+        self.doc.people.append(PersonEntry(self.unique_name()))
+        self.refresh()
+        self.people_list.setCurrentRow(len(self.doc.people) - 1)
+        self.people_list.editItem(self.people_list.currentItem())
+        self.notify()
+
+    def remove_person(self):
+        row = self.people_list.currentRow()
+        if not 0 <= row < len(self.doc.people):
+            return
+        self.doc.people.pop(row)
+        self.refresh()
+        self.notify()
+
+    def name_edited(self, item):
+        """이름은 비어 있거나 다른 사람과 같을 수 없다. 그런 이름은 받지 않고 원래 이름으로 돌린다."""
+        index = self.people_list.row(item)
+        person, name = self.doc.people[index], item.text().strip()
+        if name == person.name:
+            return
+        others = {p.name for p in self.doc.people if p is not person}
+        problem = '이름을 입력하세요.' if not name else f'"{name}"은(는) 이미 있는 이름입니다.' if name in others else ''
+        self.message.setText(problem)
+        if problem:
+            self.people_list.blockSignals(True)
+            item.setText(person.name)
+            self.people_list.blockSignals(False)
+            return
+        person.name = name
+        self.people_list.blockSignals(True)
+        item.setText(name)
+        self.people_list.blockSignals(False)
+        for row in range(len(self.doc.people)):
+            self.mark_person(row)
+        self.show_person()
+        self.notify()
+
+    # --- 관리 연도 ---
 
     def mark_year(self):
         problem = '' if valid_year(self.doc.year) else '4자리 연도를 입력하세요 (예: 2026).'
@@ -639,45 +729,135 @@ class PeopleEditor(QWidget):
         self.doc.year = text.strip()
         self.mark_year()
         for row in range(len(self.doc.people)):
-            self.update_row(row)
+            self.mark_person(row)
+        self.show_person()
         self.year_changed.emit()
-        self.changed.emit()
+        self.notify()
 
-    def matrix_edited(self, item):
-        row, column = item.row(), item.column()
-        person = self.doc.people[row]
-        if column == 0:
-            person.name = item.text()
-            for other in range(len(self.doc.people)):
-                self.update_row(other)
-            self.show_absences()
-        elif column <= len(self.columns):
-            alias = self.columns[column - 1][0]
-            if item.text().strip():
-                person.allocations[alias] = item.text().strip()
-            else:
-                person.allocations.pop(alias, None)
-            self.update_row(row)
+    # --- 참여 사업 ---
+
+    def available(self):
+        """관리 연도에 배정이 있고 사업 기간이 그 해와 겹치는 사업: 약칭 → (사업, 배정 상한 또는 None)."""
+        year = self.doc.year.strip()
+        result = {}
+        for project in self.projects():
+            alias = project.alias.strip()
+            entry = next((e for e in project.years if e.year.strip() == year), None)
+            start, end = to_date(project.start), to_date(project.end)
+            if alias and entry and valid_year(year) and (not (start and end) or start.year <= int(year) <= end.year):
+                result.setdefault(alias, (project, quantity_units(entry.manpower)))
+        return result
+
+    def choices(self, row):
+        """행에서 고를 수 있는 사업. 이 사람이 다른 행에서 이미 고른 사업은 뺀다. 잔여 배정을 함께 보인다."""
+        person = self.current()
+        if person is None:
+            return []
+        current = list(person.allocations)[row] if row < len(person.allocations) else ''
+        taken = set(person.allocations) - {current}
+        result = []
+        for alias, (project, limit) in self.available().items():
+            if alias in taken:
+                continue
+            used = sum(quantity_units(p.allocations.get(alias, '')) or 0 for p in self.doc.people)
+            remain = f'잔여 {amount(limit - used)}' if limit is not None else '배정 형식 확인 필요'
+            result.append((alias, f'{alias} — {project.name} ({remain})'))
+        return result
+
+    def row_problem(self, person, alias=None):
+        """참여 사업 행의 문제. alias를 주면 그 행만, 아니면 사람의 첫 문제를 돌려준다."""
+        available = self.available()
+        known = {p.alias.strip() for p in self.projects()}
+        rows = [(alias, person.allocations.get(alias, ''))] if alias is not None else person.allocations.items()
+        for key, value in rows:
+            if not key:
+                return '사업을 고르세요.'
+            if key not in known:
+                return '사업 목록에 없는 약칭입니다. 사업 입력 탭에서 추가하거나 행을 지우세요.'
+            if key not in available:
+                return f'{self.doc.year} 배정이 없거나 사업 기간이 아닌 사업입니다 (생성하면 오류).'
+        return ''
+
+    def show_person(self):
+        person = self.current()
+        self.title.setText(f'{person.name}의 참여 사업' if person else '사람을 고르세요')
+        table = self.allocations
+        table.blockSignals(True)
+        rows = list(person.allocations.items()) if person else []
+        table.setRowCount(len(rows))
+        names = {p.alias.strip(): p.name for p in self.projects()}
+        for row, (alias, value) in enumerate(rows):
+            table.set_cell(row, self.PROJECT, alias, problem=self.row_problem(person, alias),
+                           note=names.get(alias, ''))
+            rate = QUANTITY_HINT if value and quantity_units(value) is None else (
+                '참여율을 입력하세요.' if not value else '')
+            table.set_cell(row, self.RATE, value, problem=rate)
+            table.set_cell(row, self.PROJECT_NAME, names.get(alias, ''), editable=False)
+        table.blockSignals(False)
+        table.resizeColumnsToContents()
+        for button in (self.add_row_button, self.remove_row_button, self.add_absence_button,
+                       self.remove_absence_button):
+            button.setEnabled(person is not None)
+        self.show_totals()
+        self.show_absences()
+
+    def show_totals(self):
+        person = self.current()
+        if person is None:
+            self.totals.setText('')
+            return
+        targets, absence = person_totals(person, self.doc.year)
+        texts = [amount(v) if v is not None else '?' for v in (targets, absence)]
+        total = amount(targets + absence) if targets is not None and absence is not None else '?'
+        problem = self.total_problem(person)
+        self.totals.setText(f'사업 합계 {texts[0]} · 공백 {texts[1]} · 합계 {total}'
+                            + (f'  ⚠ {problem}' if problem else ''))
+        self.totals.setStyleSheet('color: #c62828;' if problem else '')
+
+    def allocation_edited(self, item):
+        person = self.current()
+        row, text = item.row(), item.text().strip()
+        alias = list(person.allocations)[row]
+        if item.column() == self.PROJECT_NAME:
+            return
+        if item.column() == self.PROJECT:
+            if text == alias:
+                return
+            if text in person.allocations:
+                self.message.setText(f'{person.name}에게 "{text}" 사업이 이미 있습니다.')
+                self.show_person()
+                return
+            self.message.setText('')
+            person.allocations = rename_key(person.allocations, alias, text)
         else:
-            return
-        self.changed.emit()
+            person.allocations[alias] = text
+        self.show_person()
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
 
-    def add_person(self):
-        self.doc.people.append(PersonEntry())
-        self.refresh()
-        self.matrix.setCurrentCell(len(self.doc.people) - 1, 0)
-        self.matrix.editItem(self.matrix.item(len(self.doc.people) - 1, 0))
-        self.changed.emit()
-
-    def remove_person(self):
-        row = self.matrix.currentRow()
-        if not 0 <= row < len(self.doc.people):
+    def add_row(self):
+        """빈 행을 추가하고 사업 드롭다운을 연다. 아직 사업을 고르지 않은 행이 있으면 그 행으로 간다."""
+        person = self.current()
+        if person is None:
             return
-        self.doc.people.pop(row)
-        self.refresh()
-        if self.doc.people:
-            self.matrix.setCurrentCell(min(row, len(self.doc.people) - 1), 0)
-        self.changed.emit()
+        person.allocations.setdefault('', '')
+        self.show_person()
+        row = list(person.allocations).index('')
+        self.allocations.setCurrentCell(row, self.PROJECT)
+        self.allocations.editItem(self.allocations.item(row, self.PROJECT))
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
+
+    def remove_row(self):
+        person, row = self.current(), self.allocations.currentRow()
+        if person is None or not 0 <= row < len(person.allocations):
+            return
+        person.allocations.pop(list(person.allocations)[row])
+        self.show_person()
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
+
+    # --- 사업 입력과의 연결 ---
 
     def count_alias(self, alias):
         return sum(1 for person in self.doc.people if person.allocations.get(alias, '').strip())
@@ -685,13 +865,15 @@ class PeopleEditor(QWidget):
     def rename_alias(self, old, new):
         for person in self.doc.people:
             if old in person.allocations and not person.allocations.get(new):
-                person.allocations[new] = person.allocations.pop(old)
+                person.allocations = rename_key({k: v for k, v in person.allocations.items() if k != new}, old, new)
         self.refresh()
 
     def remove_alias(self, alias):
         for person in self.doc.people:
             person.allocations.pop(alias, None)
         self.refresh()
+
+    # --- 휴직 ---
 
     def show_absences(self):
         person = self.current()
@@ -704,10 +886,6 @@ class PeopleEditor(QWidget):
                 self.absences.set_cell(row, column, text, problem=problems.get((row, column), ''))
         self.absences.blockSignals(False)
         self.absences.resizeColumnsToContents()
-        name = (person.name or '(이름 없음)') if person else '사람을 고르세요'
-        self.absences_title.setText(f'휴직 기간: {name}')
-        for button in (self.add_absence_button, self.remove_absence_button):
-            button.setEnabled(person is not None)
 
     def absence_edited(self, item):
         person = self.current()
@@ -717,8 +895,9 @@ class PeopleEditor(QWidget):
         for row in range(len(person.absences)):
             for column in range(3):
                 self.absences.mark(row, column, problems.get((row, column), ''))
-        self.update_row(self.matrix.currentRow())
-        self.changed.emit()
+        self.show_totals()
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
 
     def add_absence(self):
         person = self.current()
@@ -727,8 +906,9 @@ class PeopleEditor(QWidget):
         person.absences.append(AbsenceEntry())
         self.show_absences()
         self.absences.setCurrentCell(len(person.absences) - 1, 0)
-        self.update_row(self.matrix.currentRow())
-        self.changed.emit()
+        self.show_totals()
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
 
     def remove_absence(self):
         person, row = self.current(), self.absences.currentRow()
@@ -736,5 +916,53 @@ class PeopleEditor(QWidget):
             return
         person.absences.pop(row)
         self.show_absences()
-        self.update_row(self.matrix.currentRow())
-        self.changed.emit()
+        self.show_totals()
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
+
+
+class PeopleOverview(QWidget):
+    """사람 × 사업 참여율 종합 표(읽기 전용). 행을 두 번 누르면 그 사람의 입력 화면으로 간다."""
+
+    person_requested = Signal(int)
+
+    def __init__(self, editor):
+        super().__init__()
+        self.editor = editor
+        self.matrix = EditTable()
+        self.matrix.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.matrix.cellDoubleClicked.connect(lambda row, column: self.person_requested.emit(row))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel('전체 사람의 사업 참여율입니다. 편집은 사람 입력 탭에서 합니다 '
+                                '(행을 두 번 누르면 그 사람으로 이동).'))
+        layout.addWidget(self.matrix)
+
+    def refresh(self):
+        doc, projects = self.editor.doc, self.editor.projects()
+        known = list(dict.fromkeys(p.alias.strip() for p in projects if p.alias.strip()))
+        used = {alias for person in doc.people for alias, value in person.allocations.items() if alias and value}
+        columns = [(alias, True) for alias in known] + [(alias, False) for alias in sorted(used - set(known))]
+        names = {p.alias.strip(): p.name for p in projects}
+        headers = ['이름'] + [alias if ok else f'{alias} (미등록)' for alias, ok in columns]
+        matrix = self.matrix
+        matrix.setColumnCount(len(headers) + 3)
+        matrix.setHorizontalHeaderLabels(headers + ['사업 합계', '공백', '합계'])
+        for column, (alias, ok) in enumerate(columns, 1):
+            matrix.horizontalHeaderItem(column).setToolTip(names.get(alias, '사업 목록에 없는 약칭입니다.'))
+        matrix.setRowCount(len(doc.people))
+        for row, person in enumerate(doc.people):
+            matrix.set_cell(row, 0, person.name, editable=False, problem=self.editor.name_problem(person))
+            for column, (alias, ok) in enumerate(columns, 1):
+                value = person.allocations.get(alias, '')
+                problem = QUANTITY_HINT if value and quantity_units(value) is None else ''
+                if value and not ok:
+                    problem = problem or '사업 목록에 없는 약칭입니다.'
+                matrix.set_cell(row, column, value, editable=False, problem=problem)
+            targets, absence = person_totals(person, doc.year)
+            total = targets + absence if targets is not None and absence is not None else None
+            base = len(columns) + 1
+            for offset, value in enumerate((targets, absence, total)):
+                matrix.set_cell(row, base + offset, amount(value) if value is not None else '?', editable=False,
+                                computed=True, problem=self.editor.total_problem(person) if offset == 2 else '')
+        matrix.resizeColumnsToContents()

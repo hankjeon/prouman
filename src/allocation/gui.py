@@ -130,7 +130,7 @@ class MainWindow(QMainWindow):
     """왼쪽 메뉴로 입력 화면(파일·표 편집)과 결과 화면(생성 결과·엑셀 저장)을 바꾼다."""
 
     INPUT_PAGE, RESULT_PAGE = 0, 1
-    PROJECTS_TAB, PEOPLE_TAB = 0, 1  # input_tabs
+    PROJECTS_TAB, PEOPLE_TAB, OVERVIEW_TAB = 0, 1, 2  # input_tabs
     ISSUES_TAB, SUMMARY_TAB = 0, 1  # result_tabs
 
     def __init__(self, settings=None):
@@ -185,6 +185,8 @@ class MainWindow(QMainWindow):
         self.input_tabs = QTabWidget()
         self.input_tabs.addTab(self.project_editor, '사업 입력')
         self.input_tabs.addTab(self.people_editor, '사람 입력')
+        self.input_tabs.addTab(self.people_editor.overview, '종합')
+        self.people_editor.overview.person_requested.connect(self.open_person)
         input_page = QWidget()
         layout = QVBoxLayout(input_page)
         layout.addLayout(files)
@@ -349,6 +351,11 @@ class MainWindow(QMainWindow):
     # --- 입력 파일 열기·새로 만들기·저장 ---
 
     # --- 화면 전환 ---
+
+    def open_person(self, row):
+        """종합 탭에서 고른 사람의 입력 화면으로 간다."""
+        self.input_tabs.setCurrentIndex(self.PEOPLE_TAB)
+        self.people_editor.select_person(row)
 
     def show_page(self, page):
         self.pages.setCurrentIndex(page)
