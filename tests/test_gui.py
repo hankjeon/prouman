@@ -78,11 +78,14 @@ class GuiTests(unittest.TestCase):
     def test_T29_generate_views_copy_excel_and_settings(self):
         w = self.generated([project(), project('사업2')],
                            [person({'사업1': '0.60000', '사업2': '0.40000'}), person({'사업2': '1'}, name='김철수')])
-        self.assertEqual([w.tabs.tabText(i) for i in range(w.tabs.count())],
-                         ['사업 입력', '사람 입력', '검증', '요약', '개인상세', '사업상세'])
-        self.assertEqual(w.tabs.currentIndex(), w.SUMMARY_TAB)
+        self.assertEqual([w.input_tabs.tabText(i) for i in range(w.input_tabs.count())], ['사업 입력', '사람 입력'])
+        self.assertEqual([w.result_tabs.tabText(i) for i in range(w.result_tabs.count())],
+                         ['검증', '요약', '개인상세', '사업상세'])
+        self.assertEqual(w.pages.currentIndex(), w.RESULT_PAGE)
+        self.assertEqual(w.result_tabs.currentIndex(), w.SUMMARY_TAB)
         self.assertTrue(w.excel_button.isEnabled())
-        self.assertEqual(w.status.text(), '관리 연도 2027 · ERROR 0건 / WARNING 0건')
+        self.assertRegex(w.result_header.text(),
+                         r'^관리 연도 2027 · ERROR 0건 / WARNING 0건 · \d\d:\d\d:\d\d 생성 · projects.yaml / people.yaml$')
         self.assertEqual(self.texts(w.issue_view), [])
         self.assertEqual(sorted(self.texts(w.people_summary_view)),
                          [['김철수', '1.00000', '0.00000', '1.00000'], ['홍길동', '1.00000', '0.00000', '1.00000']])
@@ -138,10 +141,10 @@ class GuiTests(unittest.TestCase):
         _, h = self.write([project()], [person({'사업1': '0.90000'})])
         w.choose_people(str(h))
         w.generate()
-        self.assertEqual(w.tabs.currentIndex(), w.ISSUES_TAB)
+        self.assertEqual((w.pages.currentIndex(), w.result_tabs.currentIndex()), (w.RESULT_PAGE, w.ISSUES_TAB))
         self.assertFalse(w.excel_button.isEnabled())
         self.assertIsNone(w.result)
-        self.assertIn('오류로 결과를 만들지 않았습니다', w.status.text())
+        self.assertIn('오류로 결과를 만들지 않았습니다', w.result_header.text())
         issues = self.texts(w.issue_view)
         self.assertIn(['ERROR', 'E101'], [row[:2] for row in issues])
         model = w.issue_view.model()
@@ -200,7 +203,8 @@ class GuiTests(unittest.TestCase):
         w.change_font_size(0)
         self.assertEqual(w.font().pointSize(), DEFAULT_FONT_SIZE)
         menus = {a.text(): a.menu() for a in w.menuBar().actions()}
-        self.assertEqual([a.text() for a in menus['보기'].actions()], ['글자 크게', '글자 작게', '기본 크기'])
+        self.assertEqual([a.text() for a in menus['보기'].actions()],
+                         ['입력 화면', '결과 화면', '', '글자 크게', '글자 작게', '기본 크기'])
 
     # --- T30 입력 편집기 ---
 
@@ -225,7 +229,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(editor.doc.people[0].allocations['사업1'], '0.5')
         self.assertEqual(self.matrix_texts(w)[0][3:], ['0.90000', '0.00000', '0.90000'])
         self.assertTrue(matrix.item(0, 5).toolTip())
-        self.assertEqual(w.tabs.tabText(w.PEOPLE_TAB), '사람 입력 *')
+        self.assertEqual(w.input_tabs.tabText(w.PEOPLE_TAB), '사람 입력 *')
         w.generate()
         self.assertIn('E101', [row[1] for row in self.texts(w.issue_view)])
         matrix.item(0, 2).setText('0.5')
@@ -279,8 +283,8 @@ class GuiTests(unittest.TestCase):
         # 약칭을 바꾸면 사람 참여율도 따라간다.
         table.item(0, 1).setText('연구')
         self.assertEqual(w.people_editor.doc.people[0].allocations, {'연구': '0.60000', '사업2': '0.40000'})
-        self.assertEqual(w.tabs.tabText(w.PROJECTS_TAB), '사업 입력 *')
-        self.assertEqual(w.tabs.tabText(w.PEOPLE_TAB), '사람 입력 *')
+        self.assertEqual(w.input_tabs.tabText(w.PROJECTS_TAB), '사업 입력 *')
+        self.assertEqual(w.input_tabs.tabText(w.PEOPLE_TAB), '사람 입력 *')
         # 입력 확인: 약칭 공백·중복, 날짜, 연도·배정·제외 월.
         # 다른 사업과 같은 약칭을 거쳐도 그 사업의 참여율이 옮겨지지 않는다.
         table.item(1, 1).setText('연구')
@@ -340,7 +344,7 @@ class GuiTests(unittest.TestCase):
         w.project_editor.table.item(0, 0).setText('연구 지원 사업')
         self.assertTrue(w.save('projects'))
         self.assertEqual((self.path / 'projects.yaml.bak').read_text(encoding='utf-8'), original)
-        self.assertEqual(w.tabs.tabText(w.PROJECTS_TAB), '사업 입력')
+        self.assertEqual(w.input_tabs.tabText(w.PROJECTS_TAB), '사업 입력')
         self.assertIn('"연구 지원 사업"', p.read_text(encoding='utf-8'))
         # 같은 실행에서 다시 저장해도 첫 원본 백업은 그대로 둔다.
         w.project_editor.table.item(0, 0).setText('운영')
@@ -379,6 +383,62 @@ class GuiTests(unittest.TestCase):
         self.save_answers = ['discard']
         w.choose_people(str(h))
         self.assertEqual(w.people_edit.text(), str(h))
+
+    # --- T31 입력 화면과 결과 화면 ---
+
+    def test_T31_pages_and_stale_results(self):
+        _, h = self.write([project()], [person()])
+        w = self.window()
+        self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
+        self.assertTrue(w.nav_buttons[w.INPUT_PAGE].isChecked())
+        # 생성 전 결과 화면에는 안내 문구만 있다.
+        w.show_page(w.RESULT_PAGE)
+        self.assertTrue(w.nav_buttons[w.RESULT_PAGE].isChecked())
+        self.assertEqual(w.result_stack.currentIndex(), 0)
+        self.assertEqual(w.result_header.text(), '결과 없음')
+        self.assertFalse(w.excel_button.isEnabled())
+        w.show_page(w.INPUT_PAGE)
+
+        w.choose_people(str(h))
+        self.assertTrue(w.stale_bar.isHidden())  # 생성 전에는 안내하지 않는다.
+        w.generate()
+        self.assertEqual((w.pages.currentIndex(), w.result_stack.currentIndex()), (w.RESULT_PAGE, 1))
+        self.assertTrue(w.stale_bar.isHidden())
+        # 생성 뒤 입력을 고치면 결과가 예전 입력 기준임을 알린다. 메뉴에도 저장 안 한 표시가 붙는다.
+        w.people_editor.matrix.item(0, 1).setText('0.5')
+        self.assertFalse(w.stale_bar.isHidden())
+        self.assertIn('생성한 입력 기준', w.stale_label.text())
+        self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력 *')
+        self.assertTrue(w.excel_button.isEnabled())  # 이전 결과는 그대로 저장할 수 있다.
+        # 다시 생성하면 안내가 사라지고, 오류면 검증 탭과 안내 문구를 보여 준다.
+        w.generate()
+        self.assertTrue(w.stale_bar.isHidden())
+        self.assertEqual(w.result_tabs.currentIndex(), w.ISSUES_TAB)
+        self.assertIn('입력 화면에서 고친 뒤 다시 생성하세요', w.result_header.text())
+        self.assertFalse(w.excel_button.isEnabled())
+        # 저장하면 메뉴 표시가 사라지고, 결과는 그대로라 안내도 생기지 않는다.
+        w.people_editor.matrix.item(0, 1).setText('1')
+        w.generate()
+        self.assertTrue(w.save('people'))
+        self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력')
+        self.assertTrue(w.stale_bar.isHidden())
+        # 다른 파일을 열거나 새로 만들어도 안내한다. 새로 만들기는 입력 화면으로 돌아간다.
+        w.choose_people(str(h))
+        self.assertFalse(w.stale_bar.isHidden())
+        w.generate()
+        w.new_document('people')
+        self.assertFalse(w.stale_bar.isHidden())
+        self.assertEqual((w.pages.currentIndex(), w.input_tabs.currentIndex()), (w.INPUT_PAGE, w.PEOPLE_TAB))
+        # 새 파일로 생성하면 머리 줄에 새 파일로 표시한다.
+        w.generate()
+        self.assertIn('(새 사람 파일)', w.result_header.text())
+        menus = {a.text(): a.menu() for a in w.menuBar().actions()}
+        actions = {a.text(): a for a in menus['보기'].actions()}
+        self.assertEqual(actions['입력 화면'].shortcut().toString(), 'Ctrl+1')
+        actions['입력 화면'].trigger()
+        self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
+        actions['결과 화면'].trigger()
+        self.assertEqual(w.pages.currentIndex(), w.RESULT_PAGE)
 
     def test_T29_find_projects_file(self):
         p, h = self.write([project()], [person()])

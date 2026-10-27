@@ -1,13 +1,15 @@
 """PySide6 데스크톱 화면. 사업·사람 입력을 표로 편집하고, 계산 결과를 그리드로 보여 준다."""
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton, QSplitter,
-                               QTableView, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QFileDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
+                               QSizePolicy, QSplitter, QStackedWidget, QTableView, QTabWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .document import DocumentError, PeopleDoc, dump_people, dump_projects, read_people, read_projects
 from .editor import PeopleEditor, ProjectEditor, SelectionDelegate
@@ -125,19 +127,26 @@ def find_projects_file(people_path):
 
 
 class MainWindow(QMainWindow):
-    # 탭 순서: 입력 탭 다음에 결과 탭을 둔다.
-    PROJECTS_TAB, PEOPLE_TAB, ISSUES_TAB, SUMMARY_TAB = 0, 1, 2, 3
+    """왼쪽 메뉴로 입력 화면(파일·표 편집)과 결과 화면(생성 결과·엑셀 저장)을 바꾼다."""
+
+    INPUT_PAGE, RESULT_PAGE = 0, 1
+    PROJECTS_TAB, PEOPLE_TAB = 0, 1  # input_tabs
+    ISSUES_TAB, SUMMARY_TAB = 0, 1  # result_tabs
 
     def __init__(self, settings=None):
         super().__init__()
         self.settings = settings if settings is not None else QSettings('prouman', 'prouman')
         self.result = None
+        self.issues = []
+        self.generated_at = None  # 마지막 생성 시각. 이후 입력이 바뀌면 결과 화면에 다시 생성 안내를 띄운다.
+        self.generated_from = ()  # 생성할 때의 사업·사람 파일 표시 이름
         self.auto_projects = None
         self.dirty = {'projects': False, 'people': False}
         self.backed_up = set()  # 이번 실행에서 .bak을 만든 파일. 첫 저장 직전의 원본만 백업한다.
         self.setWindowTitle('인력 배분')
-        self.resize(1200, 760)
+        self.resize(1280, 800)
 
+        # 입력 화면: 파일 줄, 생성 버튼, 사업·사람 입력 탭
         self.projects_edit, self.people_edit = QLineEdit(), QLineEdit()
         self.edits = {'projects': self.projects_edit, 'people': self.people_edit}
         files = QGridLayout()
@@ -155,17 +164,14 @@ class MainWindow(QMainWindow):
                 button = QPushButton(text)
                 button.clicked.connect(slot)
                 files.addWidget(button, row, column)
-        self.generate_button, self.excel_button = QPushButton('생성'), QPushButton('엑셀 저장')
-        self.generate_button.setToolTip('입력 탭의 현재 내용으로 계산합니다. 저장하지 않아도 됩니다.')
+        self.generate_button = QPushButton('생성 ▶')
+        self.generate_button.setToolTip('입력 화면의 현재 내용으로 계산합니다. 저장하지 않아도 됩니다.')
+        self.generate_button.setStyleSheet('QPushButton { font-weight: bold; padding: 6px 24px; }')
         self.generate_button.clicked.connect(self.generate)
-        self.excel_button.clicked.connect(self.browse_excel)
-        self.excel_button.setEnabled(False)
-        self.status = QLabel('사업·사람 파일을 열거나 새로 만들어 입력한 뒤 생성을 누르세요.')
-        actions = QHBoxLayout()
-        actions.addWidget(self.generate_button)
-        actions.addWidget(self.excel_button)
-        actions.addStretch()
-        actions.addWidget(self.status)
+        generate_row = QHBoxLayout()
+        generate_row.addWidget(QLabel('입력을 마치면 생성을 누르세요. 저장하지 않아도 현재 내용으로 계산합니다.'))
+        generate_row.addStretch()
+        generate_row.addWidget(self.generate_button)
 
         self.project_editor = ProjectEditor()
         self.people_editor = PeopleEditor(lambda: self.project_editor.projects)
@@ -175,6 +181,34 @@ class MainWindow(QMainWindow):
         self.project_editor.alias_renamed.connect(self.alias_renamed)
         self.project_editor.alias_removed.connect(self.people_editor.remove_alias)
         self.people_editor.changed.connect(lambda: self.set_dirty('people', True))
+        self.input_tabs = QTabWidget()
+        self.input_tabs.addTab(self.project_editor, '사업 입력')
+        self.input_tabs.addTab(self.people_editor, '사람 입력')
+        input_page = QWidget()
+        layout = QVBoxLayout(input_page)
+        layout.addLayout(files)
+        layout.addLayout(generate_row)
+        layout.addWidget(self.input_tabs)
+
+        # 결과 화면: 머리 줄(생성 정보·엑셀 저장), 다시 생성 안내, 결과 탭
+        self.result_header = QLabel()
+        self.excel_button = QPushButton('엑셀 저장')
+        self.excel_button.clicked.connect(self.browse_excel)
+        self.excel_button.setEnabled(False)
+        header = QHBoxLayout()
+        header.addWidget(self.result_header, 1)
+        header.addWidget(self.excel_button)
+        self.stale_label = QLabel()
+        regenerate = QPushButton('다시 생성')
+        regenerate.clicked.connect(self.generate)
+        self.stale_bar = QFrame()
+        self.stale_bar.setStyleSheet('QFrame { background-color: #fff4c2; border: 1px solid #e0c060; }'
+                                     'QLabel { border: none; }')
+        stale = QHBoxLayout(self.stale_bar)
+        stale.setContentsMargins(8, 4, 8, 4)
+        stale.addWidget(self.stale_label, 1)
+        stale.addWidget(regenerate)
+        self.stale_bar.hide()
 
         self.issue_view = CopyTableView()
         self.people_summary_view, self.project_summary_view = CopyTableView(), CopyTableView()
@@ -182,10 +216,10 @@ class MainWindow(QMainWindow):
         for title, view in (('개인별 연간 요약', self.people_summary_view),
                             ('사업별 연간 요약', self.project_summary_view)):
             box = QWidget()
-            layout = QVBoxLayout(box)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(QLabel(title))
-            layout.addWidget(view)
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(0, 0, 0, 0)
+            box_layout.addWidget(QLabel(title))
+            box_layout.addWidget(view)
             summary.addWidget(box)
         # 개인별 요약은 4열, 사업별 요약은 사업명이 있어 더 넓게 둔다.
         summary.setSizes([400, 800])
@@ -197,17 +231,53 @@ class MainWindow(QMainWindow):
         people.addWidget(self.person_view)
         people.setSizes([180, 1000])
         self.project_view = CopyTableView()
-        self.tabs = QTabWidget()
-        for widget, title in ((self.project_editor, '사업 입력'), (self.people_editor, '사람 입력'),
-                              (self.issue_view, '검증'), (summary, '요약'), (people, '개인상세'),
+        self.result_tabs = QTabWidget()
+        for widget, title in ((self.issue_view, '검증'), (summary, '요약'), (people, '개인상세'),
                               (self.project_view, '사업상세')):
-            self.tabs.addTab(widget, title)
+            self.result_tabs.addTab(widget, title)
+        placeholder = QLabel('아직 생성하지 않았습니다.\n입력 화면에서 [생성 ▶]을 누르세요.')
+        placeholder.setAlignment(Qt.AlignCenter)
+        self.result_stack = QStackedWidget()
+        self.result_stack.addWidget(placeholder)
+        self.result_stack.addWidget(self.result_tabs)
+        result_page = QWidget()
+        layout = QVBoxLayout(result_page)
+        layout.addLayout(header)
+        layout.addWidget(self.stale_bar)
+        layout.addWidget(self.result_stack)
 
+        # 왼쪽 메뉴와 화면 전환
+        self.pages = QStackedWidget()
+        self.pages.addWidget(input_page)
+        self.pages.addWidget(result_page)
+        nav = QFrame()
+        nav.setObjectName('nav')
+        nav.setStyleSheet('#nav { background-color: #e8edf3; }'
+                          'QToolButton { border: none; padding: 10px 6px; text-align: left; }'
+                          'QToolButton:checked { background-color: #b7dcff; font-weight: bold; }'
+                          'QToolButton:hover:!checked { background-color: #d5e3f2; }')
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(4, 8, 4, 8)
+        self.nav_group = QButtonGroup(self)
+        self.nav_buttons = []
+        for page, text in ((self.INPUT_PAGE, '✎  입력'), (self.RESULT_PAGE, '▦  결과')):
+            button = QToolButton()
+            button.setText(text)
+            button.setCheckable(True)
+            button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.clicked.connect(lambda checked=False, page=page: self.show_page(page))
+            self.nav_group.addButton(button, page)
+            self.nav_buttons.append(button)
+            nav_layout.addWidget(button)
+        nav_layout.addStretch()
+        nav.setMinimumWidth(110)
         central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.addLayout(files)
-        layout.addLayout(actions)
-        layout.addWidget(self.tabs)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(nav)
+        layout.addWidget(self.pages, 1)
         self.setCentralWidget(central)
 
         file_menu = self.menuBar().addMenu('파일')
@@ -216,6 +286,12 @@ class MainWindow(QMainWindow):
         save_all.triggered.connect(self.save_all)
         file_menu.addAction(save_all)
         view_menu = self.menuBar().addMenu('보기')
+        for page, text, key in ((self.INPUT_PAGE, '입력 화면', 'Ctrl+1'), (self.RESULT_PAGE, '결과 화면', 'Ctrl+2')):
+            action = QAction(text, self)
+            action.setShortcut(QKeySequence(key))
+            action.triggered.connect(lambda checked=False, page=page: self.show_page(page))
+            view_menu.addAction(action)
+        view_menu.addSeparator()
         for text, keys, step in (('글자 크게', [QKeySequence.ZoomIn, QKeySequence('Ctrl+=')], 1),
                                  ('글자 작게', [QKeySequence.ZoomOut], -1),
                                  ('기본 크기', [QKeySequence('Ctrl+0')], 0)):
@@ -224,6 +300,8 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, step=step: self.change_font_size(step))
             view_menu.addAction(action)
         self.set_font_size(self.settings.value('font_size', DEFAULT_FONT_SIZE, type=int), save=False)
+        self.show_page(self.INPUT_PAGE)
+        self.show_result_header()
 
         # 지난번 파일을 다시 연다. 열 수 없으면 조용히 빈 입력으로 시작한다.
         for kind in KINDS:
@@ -269,10 +347,36 @@ class MainWindow(QMainWindow):
 
     # --- 입력 파일 열기·새로 만들기·저장 ---
 
+    # --- 화면 전환 ---
+
+    def show_page(self, page):
+        self.pages.setCurrentIndex(page)
+        self.nav_buttons[page].setChecked(True)
+
+    def show_result_header(self, extra=''):
+        if self.generated_at is None:
+            self.result_header.setText('결과 없음')
+            return
+        errors, warnings = issue_counts(self.issues)
+        year = f'관리 연도 {self.result.inputs.year} · ' if self.result is not None else ''
+        names = ' / '.join(label if label.startswith('(') else Path(label).name for label in self.generated_from)
+        self.result_header.setText(f'{year}ERROR {errors}건 / WARNING {warnings}건 · '
+                                   f'{self.generated_at:%H:%M:%S} 생성 · {names}{extra}')
+
+    def mark_stale(self):
+        """생성한 뒤 입력이 바뀌면 결과가 예전 입력 기준임을 알린다."""
+        if self.generated_at is not None:
+            self.stale_label.setText(f'입력이 바뀌었습니다. 아래 결과는 {self.generated_at:%H:%M:%S}에 생성한 '
+                                     '입력 기준입니다.')
+            self.stale_bar.show()
+
     def set_dirty(self, kind, dirty):
         self.dirty[kind] = dirty
         index = self.PROJECTS_TAB if kind == 'projects' else self.PEOPLE_TAB
-        self.tabs.setTabText(index, f'{KINDS[kind]} 입력' + (' *' if dirty else ''))
+        self.input_tabs.setTabText(index, f'{KINDS[kind]} 입력' + (' *' if dirty else ''))
+        self.nav_buttons[self.INPUT_PAGE].setText('✎  입력' + (' *' if any(self.dirty.values()) else ''))
+        if dirty:
+            self.mark_stale()
 
     def projects_changed(self):
         self.set_dirty('projects', True)
@@ -339,7 +443,7 @@ class MainWindow(QMainWindow):
             document, dropped = read_projects(text) if kind == 'projects' else read_people(text)
         except (OSError, UnicodeError, DocumentError) as exc:
             if quiet:
-                self.status.setText(f'{KINDS[kind]} 파일을 열지 못했습니다: {path}')
+                self.statusBar().showMessage(f'{KINDS[kind]} 파일을 열지 못했습니다: {path}')
             else:
                 self.warn(f'{KINDS[kind]} 파일 열기 실패', f'{path}\n{exc}')
             return False
@@ -351,7 +455,9 @@ class MainWindow(QMainWindow):
         self.edits[kind].setText(str(path))
         self.backed_up.discard(str(Path(path).resolve()))
         self.set_dirty(kind, False)
+        self.mark_stale()
         self.settings.setValue(f'{kind}_file', str(path))
+        self.statusBar().showMessage(f'{KINDS[kind]} 파일 열기: {path}')
         if dropped and not quiet:
             self.warn('지원하지 않는 항목', '표 편집기에서 다루지 않는 다음 항목은 저장할 때 빠집니다.\n'
                       + '\n'.join(dropped[:20]) + ('\n...' if len(dropped) > 20 else ''))
@@ -368,7 +474,9 @@ class MainWindow(QMainWindow):
             self.people_editor.set_doc(PeopleDoc())
         self.edits[kind].setText('')
         self.set_dirty(kind, False)
-        self.tabs.setCurrentIndex(self.PROJECTS_TAB if kind == 'projects' else self.PEOPLE_TAB)
+        self.mark_stale()
+        self.show_page(self.INPUT_PAGE)
+        self.input_tabs.setCurrentIndex(self.PROJECTS_TAB if kind == 'projects' else self.PEOPLE_TAB)
 
     def text(self, kind):
         if kind == 'projects':
@@ -393,7 +501,7 @@ class MainWindow(QMainWindow):
         self.edits[kind].setText(str(path))
         self.set_dirty(kind, False)
         self.settings.setValue(f'{kind}_file', str(path))
-        self.status.setText(f'{KINDS[kind]} 파일 저장: {path}')
+        self.statusBar().showMessage(f'{KINDS[kind]} 파일 저장: {path}')
         return True
 
     def save_as(self, kind):
@@ -417,41 +525,45 @@ class MainWindow(QMainWindow):
         self.person_list.clear()
 
     def generate(self):
-        """입력 탭의 현재 내용(저장 전이어도)을 파일과 같은 규칙으로 검증하고 계산한다."""
-        labels = [self.edits[kind].text() or f'(새 {KINDS[kind]} 파일)' for kind in KINDS]
-        self.result = None
+        """입력 화면의 현재 내용(저장 전이어도)을 파일과 같은 규칙으로 검증·계산하고 결과 화면으로 간다."""
+        labels = tuple(self.edits[kind].text() or f'(새 {KINDS[kind]} 파일)' for kind in KINDS)
+        self.result, self.issues, self.generated_at = None, [], None
         self.excel_button.setEnabled(False)
         self.clear_results()
+        self.issue_view.show_table([], [])
+        self.stale_bar.hide()
+        self.result_stack.setCurrentIndex(0)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             inputs, issues = load_inputs(*labels, texts={kind: self.text(kind) for kind in KINDS})
             result = calculate(inputs, issues) if inputs is not None else None
         except Exception as exc:  # 예상하지 못한 실패도 창을 닫지 않고 알린다.
-            self.issue_view.show_table([], [])
-            self.status.setText('계산 실패')
+            self.show_result_header()
+            self.statusBar().showMessage('계산 실패')
             self.warn('계산 실패', f'{type(exc).__name__}: {exc}')
             return
         finally:
             QApplication.restoreOverrideCursor()
 
-        issues = result.issues if result is not None else issues
-        self.issue_view.show_table(*issue_table(issues), colors=SEVERITY_COLORS)
-        errors, warnings = issue_counts(issues)
-        counts = f'ERROR {errors}건 / WARNING {warnings}건'
+        self.issues = result.issues if result is not None else issues
+        self.generated_at, self.generated_from = datetime.now(), labels
+        self.result_stack.setCurrentIndex(1)
+        self.issue_view.show_table(*issue_table(self.issues), colors=SEVERITY_COLORS)
+        self.show_page(self.RESULT_PAGE)
         if result is None or result.has_errors:
-            self.status.setText(f'{counts} · 오류로 결과를 만들지 않았습니다')
-            self.tabs.setCurrentIndex(self.ISSUES_TAB)
+            self.show_result_header(' · 오류로 결과를 만들지 않았습니다. 입력 화면에서 고친 뒤 다시 생성하세요.')
+            self.result_tabs.setCurrentIndex(self.ISSUES_TAB)
             return
 
         self.result = result
-        self.status.setText(f'관리 연도 {result.inputs.year} · {counts}')
+        self.show_result_header()
         self.people_summary_view.show_table(*people_summary_table(result))
         self.project_summary_view.show_table(*project_summary_table(result))
         self.project_view.show_table(*project_detail_table(result))
         self.person_list.addItems(list(result.inputs.people))
         self.person_list.setCurrentRow(0)
         self.excel_button.setEnabled(True)
-        self.tabs.setCurrentIndex(self.SUMMARY_TAB)
+        self.result_tabs.setCurrentIndex(self.SUMMARY_TAB)
 
     def show_person(self, name):
         if self.result is not None and name in self.result.inputs.people:
@@ -476,7 +588,7 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self.warn('엑셀 저장 실패', f'{path}\n{exc.strerror or exc}\n파일이 열려 있으면 닫고 다시 저장하세요.')
             return False
-        self.status.setText(f'엑셀 저장: {path}')
+        self.statusBar().showMessage(f'엑셀 저장: {path}')
         return True
 
 
