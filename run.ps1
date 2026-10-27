@@ -6,7 +6,7 @@ $programArgs = @($args)
 
 if ($programArgs.Count -eq 0) {
     Write-Output @'
-사용법: .\run.ps1 <사람 YAML 파일> [--person 이름 | --project 사업약칭 | --all-people | --all-projects | --all]
+사용법: .\run.ps1 <사람 YAML 파일> [--person 이름 | --project 사업약칭 | --all-people | --all-projects | --all] [--excel 파일.xlsx]
 
 예시 (저장소 루트에서 실행):
   .\run.ps1 people\people_2027.yaml
@@ -15,6 +15,7 @@ if ($programArgs.Count -eq 0) {
   .\run.ps1 people\people_2027.yaml --all-people    # 사람 전체 상세
   .\run.ps1 people\people_2027.yaml --all-projects  # 사업 전체 상세
   .\run.ps1 people\people_2027.yaml --all
+  .\run.ps1 people\people_2027.yaml --excel 결과.xlsx  # 전체 결과를 엑셀로 저장
 
 템플릿 실행:
   cd templates\01_basic

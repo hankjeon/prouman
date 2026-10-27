@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+from openpyxl import load_workbook
 
 # src 레이아웃을 설치 없이 테스트합니다. CLI는 src/main.py에서 실행합니다.
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,7 @@ from allocation.engine import BASE, calculate, validate_result
 from allocation.flow import transport
 from allocation.loading import load_inputs
 from allocation.models import amount
-from allocation.rendering import render_result
+from allocation.rendering import person_summary, person_table, project_summary, render_result
 
 
 def project(alias='사업1', year=2027, excluded=(), limit='10.00000', period=None):
@@ -459,6 +460,78 @@ class AcceptanceTests(unittest.TestCase):
         inputs, issues = load_inputs(*paths)
         self.assertIsNone(inputs)
         self.assertIn('E001', [i.code for i in issues])
+
+    def test_T28_excel_output(self):
+        # 사업1의 제외 월 4월 중복으로 W001 경고 1건이 생긴다.
+        paths = self.write([project(excluded=[4, 4]), project('사업2')],
+                           [person({'사업1': '0.60000', '사업2': '0.40000'}), person({'사업2': '1'}, name='김철수')])
+        result, _ = self.run_files(paths)
+        p = self.cli('--person', '홍길동', '--excel', 'out.xlsx')
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        self.assertNotIn('개인별 연간 요약', p.stdout)
+        self.assertTrue(p.stdout.rstrip().endswith('엑셀 저장: out.xlsx'))
+        book = load_workbook(self.path / 'out.xlsx')
+        self.assertEqual(book.sheetnames, ['검증', '요약', '개인상세', '사업상세'])
+
+        def cells(sheet):
+            return [['' if c.value is None else f'{c.value:.5f}' if type(c.value) in (int, float) else c.value
+                     for c in row] for row in sheet.iter_rows()]
+
+        def padded(rows, width):
+            return [row + [''] * (width - len(row)) for row in rows]
+
+        check = cells(book['검증'])
+        self.assertEqual(check[3][:2], ['검증 결과', 'ERROR 0건 / WARNING 1건'])
+        self.assertEqual(check[6][:2], ['WARNING', 'W001'])
+        self.assertEqual(len(check), 7)
+        # 조회 옵션이 --person이어도 엑셀에는 모든 사람과 사업이 들어간다.
+        expected = [['이름', '사업', '공백', '합계']]
+        expected += [[name, *map(amount, person_summary(result, name))] for name in result.allocations]
+        expected += [[], ['사업약칭', '사업명', '배정', '할당', '잔여', '비고']]
+        details = [['사업약칭', '사업명', '배정', '할당', '잔여', '비고', *(f'{m}월' for m in range(1, 13))]]
+        for alias in result.inputs.projects:
+            item, limit, missing, totals = project_summary(result, alias)
+            row = [alias, item.name, *map(amount, (limit, sum(totals), limit - sum(totals))),
+                   '배정 미등록' if missing else '']
+            expected.append(row)
+            details.append(row + [amount(v) for v in totals])
+        self.assertEqual(cells(book['요약']), padded(expected, 6))
+        self.assertEqual(cells(book['사업상세']), details)
+        self.assertEqual(details[1][:5], ['사업1', '사업1', '10.00000', '0.60000', '9.40000'])
+        people = []
+        for name in result.inputs.people:
+            people += [[name], ['사업/구분', *(f'{m}월' for m in range(1, 13)), '연간']]
+            people += [[label, *(amount(v) for v in values + [sum(values)])]
+                       for label, values in person_table(result, name)]
+            people.append([])
+        # 마지막 빈 행은 값이 없으므로 파일에 남지 않는다.
+        self.assertEqual(cells(book['개인상세']), padded(people[:-1], 14))
+        for sheet in book.worksheets[1:]:
+            for row in sheet.iter_rows():
+                for c in row:
+                    if type(c.value) in (int, float):
+                        self.assertEqual(c.number_format, '0.00000', (sheet.title, c.coordinate))
+        # 같은 입력은 같은 셀 값을 만든다.
+        self.assertEqual(self.cli('--excel', 'again.xlsx').returncode, 0)
+        again = load_workbook(self.path / 'again.xlsx')
+        self.assertEqual([cells(s) for s in again.worksheets], [cells(s) for s in book.worksheets])
+
+        # 확장자 오류는 사용법 오류, 저장 실패는 실행 오류다.
+        self.assertEqual(self.cli('--excel', 'out.csv').returncode, 2)
+        (self.path / 'folder.xlsx').mkdir()
+        p = self.cli('--excel', 'folder.xlsx')
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('엑셀 저장 실패: folder.xlsx', p.stdout)
+
+        # ERROR가 있으면 파일을 만들지 않는다.
+        self.write([project()], [person({'사업1': '0.90000'})])
+        for broken in (False, True):
+            if broken:
+                (self.path / 'projects.yaml').unlink()
+            p = self.cli('--excel', 'error.xlsx')
+            self.assertEqual(p.returncode, 1)
+            self.assertIn('엑셀: 오류로 생성하지 않음', p.stdout)
+            self.assertFalse((self.path / 'error.xlsx').exists())
 
     def test_schema_errors_aggregate(self):
         p = project()

@@ -6,7 +6,7 @@
 
 코드 작성 전 `README.md` → `docs/requirements.md` → `docs/data-model.md` → `docs/allocation-algorithm.md` → `docs/validation.md` → `docs/test-cases.md` 순서로 읽는다. 과거 예시의 월별 직접 입력, 사업 기간 일수 비례 계산, 개인별 `yearly` 묶음, 사업 배정인력 완전 소진은 최종 규칙이 아니다.
 
-1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. GUI, 그래프, CSV/Excel 출력 및 사업 우선순위 기반 연간 목표 자동 생성은 2차 이후다.
+1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. 엑셀(.xlsx) 저장(`--excel`)은 1차 범위다. GUI, 그래프, CSV 출력 및 사업 우선순위 기반 연간 목표 자동 생성은 2차 이후다.
 
 ## 필수 구현 원칙
 

@@ -2,7 +2,7 @@
 
 사람별·사업별 연간 할당 목표를 월별로 배분하는 Python CLI다. 입력한 연간 목표를 유지하면서 월별 가용량, 휴직, 사업 기간, 제외 월, 사업별 연간 배정 상한을 검증한다. 오류가 있으면 최종 할당표를 출력하지 않는다.
 
-Python 3.10 이상과 PyYAML 6.0.3을 사용한다. 이번 구현은 Python 3.12에서 검증했다. 실행 시 인터넷이나 서버는 필요하지 않다. GUI, 그래프, Excel/CSV 출력, 연간 목표 자동 결정은 후속 범위다.
+Python 3.10 이상과 PyYAML 6.0.3, 엑셀 저장용 openpyxl 3.1.5(의존성 et-xmlfile 2.0.0)를 사용한다. 이번 구현은 Python 3.12에서 검증했다. 실행 시 인터넷이나 서버는 필요하지 않다. GUI, 그래프, CSV 출력, 연간 목표 자동 결정은 후속 범위다.
 
 ## 설치
 
@@ -79,6 +79,24 @@ Windows에서는 `python3` 대신 `python`, `.venv/bin/python` 대신 `.venv\Scr
 
 Linux에서는 같은 인자를 `./run.sh`에 전달한다. `--person`, `--project`, `--all-people`, `--all-projects`, `--all` 중 한 가지 조회 옵션만 지정할 수 있다.
 
+### 엑셀 저장
+
+`--excel 파일.xlsx`를 붙이면 계산 결과를 엑셀 파일로도 저장한다. 조회 옵션과 함께 쓸 수 있으며, 엑셀에는 조회 옵션과 관계없이 전체 결과가 들어간다. 경로는 실행 작업 디렉터리 기준이다.
+
+```powershell
+.\run.ps1 people\people_2027.yaml --excel 결과_2027.xlsx
+.\run.ps1 people\people_2027.yaml --person 홍길동 --excel 결과_2027.xlsx
+```
+
+| 시트 | 내용 |
+| --- | --- |
+| `검증` | 관리 연도, 입력 파일, `ERROR`/`WARNING` 건수와 이슈 목록 |
+| `요약` | 개인별 연간 요약(사업·공백·합계), 사업별 연간 요약(배정·할당·잔여) |
+| `개인상세` | 사람마다 사업·공백·합계의 1~12월·연간 표 |
+| `사업상세` | 사업마다 한 행: 배정·할당·잔여와 1~12월 할당 |
+
+수량은 표시 형식 `0.00000`의 숫자 셀이며 합계는 수식이 아닌 계산 값이다. `ERROR`가 있으면 파일을 만들지 않는다. 같은 이름의 파일은 덮어쓰며, 엑셀에서 열어 둔 파일은 저장에 실패하므로 닫고 다시 실행한다. 상세 규칙은 [요구사항](docs/requirements.md)에 있다.
+
 ## 입력 템플릿
 
 [templates/README.md](templates/README.md)에 권장 폴더 구조와 실행 방법을 정리했다. `templates/`에는 기본 배분, 여러 사람·사업, 제외 월, 부분 사업 기간, 휴직, 윤년, 다년 사업, 공백 처리, 경고·오류 등 17개 사례의 주석 달린 YAML 예제가 있다. 각 사례 폴더를 작업 디렉터리로 사용하며, `errors/`의 입력은 의도적으로 실패하는 참고 자료다.
@@ -90,8 +108,9 @@ Linux에서는 같은 인자를 `./run.sh`에 전달한다. `--person`, `--proje
 - `src/allocation/models.py`: 입력·결과·진단 모델과 고정 소수 출력
 - `src/allocation/flow.py`: 정수 최대 흐름 및 균등 초안을 참고한 재배치
 - `src/allocation/engine.py`: 공백·허용 월 계산, 사전·사후 검증
-- `src/allocation/rendering.py`: 진단·요약·상세표 출력
-- `tests/test_allocation.py`: T01~T27, 경계 입력, 결정성, 완전 탐색 비교
+- `src/allocation/rendering.py`: 진단·요약·상세표 출력과 텍스트·엑셀 공용 집계
+- `src/allocation/excel.py`: 엑셀(.xlsx) 저장
+- `tests/test_allocation.py`: T01~T28, 경계 입력, 결정성, 완전 탐색 비교
 
 ## 테스트
 
