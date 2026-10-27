@@ -12,8 +12,7 @@ def render_issues(issues):
 
 
 def table_row(label, values):
-    quarters = [sum(values[q:q + 3]) for q in (0, 3, 6, 9)]
-    return ' | '.join([label, *(amount(value) for value in values + quarters + [sum(values)])])
+    return ' | '.join([label, *(amount(value) for value in values + [sum(values)])])
 
 
 def render_result(result, person=None, project=None, show_all=False):
@@ -34,7 +33,7 @@ def render_result(result, person=None, project=None, show_all=False):
         total = sum(sum(rows.get(alias, [])) for rows in result.allocations.values())
         lines.append(f'{alias} ({item.name}): {amount(limit)} / {amount(total)} / {amount(limit - total)}'
                      + (' (배정 미등록)' if budget is None else ''))
-    header = ' | '.join(['사업/구분', *(f'{m}월' for m in range(1, 13)), '1분기', '2분기', '3분기', '4분기', '연간'])
+    header = ' | '.join(['사업/구분', *(f'{m}월' for m in range(1, 13)), '연간'])
     names = list(inputs.people) if show_all else [person] if person is not None else []
     for name in names:
         lines.extend([f'개인 상세: {name}', header])

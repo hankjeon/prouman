@@ -308,14 +308,22 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(r.absence['홍길동'], list(BASE))
         self.bad(people=[person({})], code='E101')
 
-    def test_T25_options_and_quarter_output(self):
+    def test_T25_options_and_monthly_annual_output(self):
         self.write([project()], [person()])
         for args in (('--all', '--person', '홍길동'), ('--all', '--project', '사업1'),
                      ('--person', '홍길동', '--project', '사업1')):
             self.assertEqual(self.cli(*args).returncode, 2)
-        p = self.cli('--all')
-        self.assertIn('1분기', p.stdout)
-        self.assertIn('0.25000', p.stdout)
+        for args in (('--all',), ('--person', '홍길동'), ('--project', '사업1')):
+            with self.subTest(args=args):
+                p = self.cli(*args)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertNotIn('분기', p.stdout)
+                lines = [line.split(' | ') for line in p.stdout.splitlines() if ' | ' in line]
+                self.assertEqual(lines[0], ['사업/구분', '1월', '2월', '3월', '4월', '5월', '6월',
+                                            '7월', '8월', '9월', '10월', '11월', '12월', '연간'])
+                for row in lines[1:]:
+                    self.assertEqual(len(row), 14)
+                    self.assertEqual(row[-1], '1.00000' if row[0] != '공백' else '0.00000')
         (self.path / 'projects.yaml').unlink()
         p = self.cli()
         self.assertEqual(p.returncode, 1)
