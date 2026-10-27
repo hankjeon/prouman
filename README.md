@@ -33,10 +33,10 @@ Windows에서는 `python3` 대신 `python`, `.venv/bin/python` 대신 `.venv\Scr
 저장소 루트에 동작 가능한 예제 `projects.yaml`과 `people/people_2027.yaml`이 있다. 실제 업무 데이터로 교체하기 전에 예제로 실행할 수 있다.
 
 ```bash
-.venv/bin/python main.py people/people_2027.yaml
-.venv/bin/python main.py people/people_2027.yaml --person 홍길동
-.venv/bin/python main.py people/people_2027.yaml --project 사업1
-.venv/bin/python main.py people/people_2027.yaml --all
+.venv/bin/python src/main.py people/people_2027.yaml
+.venv/bin/python src/main.py people/people_2027.yaml --person 홍길동
+.venv/bin/python src/main.py people/people_2027.yaml --project 사업1
+.venv/bin/python src/main.py people/people_2027.yaml --all
 ```
 
 사업 파일은 **현재 실행 작업 디렉터리의 `projects.yaml`**이다. 사람 파일 경로는 위치 인자이며, 관리 연도는 파일명이 아니라 파일 안의 `year`에서 읽는다. 조회 옵션 세 개는 함께 사용할 수 없다.
@@ -74,12 +74,12 @@ Windows에서는 `python3` 대신 `python`, `.venv/bin/python` 대신 `.venv\Scr
 
 ## 구성
 
-- `main.py`, `allocation/cli.py`: CLI 진입점과 조회 인자
-- `allocation/loading.py`: 안전한 YAML 로드, 원문 숫자·중복 키·스키마 검증
-- `allocation/models.py`: 입력·결과·진단 모델과 고정 소수 출력
-- `allocation/flow.py`: 정수 최대 흐름 및 균등 초안을 참고한 재배치
-- `allocation/engine.py`: 공백·허용 월 계산, 사전·사후 검증
-- `allocation/rendering.py`: 진단·요약·상세표 출력
+- `src/main.py`, `src/allocation/cli.py`: CLI 진입점과 조회 인자
+- `src/allocation/loading.py`: 안전한 YAML 로드, 원문 숫자·중복 키·스키마 검증
+- `src/allocation/models.py`: 입력·결과·진단 모델과 고정 소수 출력
+- `src/allocation/flow.py`: 정수 최대 흐름 및 균등 초안을 참고한 재배치
+- `src/allocation/engine.py`: 공백·허용 월 계산, 사전·사후 검증
+- `src/allocation/rendering.py`: 진단·요약·상세표 출력
 - `tests/test_allocation.py`: T01~T26, 경계 입력, 결정성, 완전 탐색 비교
 
 ## 테스트

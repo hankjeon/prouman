@@ -1,4 +1,4 @@
-﻿# 실행한 작업 디렉터리는 유지하고, 저장소의 main.py를 호출합니다.
+﻿# 실행한 작업 디렉터리는 유지하고, 저장소의 src/main.py를 호출합니다.
 $ErrorActionPreference = 'Stop'
 # PowerShell 7에서도 Python의 실패 종료 코드를 직접 전달합니다.
 $PSNativeCommandUseErrorActionPreference = $false
@@ -26,7 +26,7 @@ if ($programArgs.Count -eq 0) {
 }
 
 $exitCode = 1
-$entryPoint = Join-Path $PSScriptRoot 'main.py'
+$entryPoint = Join-Path $PSScriptRoot 'src\main.py'
 try {
     if ($env:VIRTUAL_ENV) {
         $venvDir = $env:VIRTUAL_ENV

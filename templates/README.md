@@ -48,7 +48,7 @@ templates/
 
 ```bash
 cd templates/01_basic
-../../.venv/bin/python ../../main.py people/people_2027.yaml --all
+../../.venv/bin/python ../../src/main.py people/people_2027.yaml --all
 ```
 
 프로그램은 **현재 작업 폴더의 `projects.yaml`**을 읽는다. 저장소 루트에서 사람 파일 경로만 템플릿으로 지정하면 루트의 다른 사업 파일을 읽으므로, 실행 전에 원하는 사례 폴더로 이동한다.
@@ -56,26 +56,26 @@ cd templates/01_basic
 동일한 사례 폴더 안에서 개인·사업을 조회할 수도 있다:
 
 ```bash
-../../.venv/bin/python ../../main.py people/people_2027.yaml --person 홍길동
-../../.venv/bin/python ../../main.py people/people_2027.yaml --project 연구지원
+../../.venv/bin/python ../../src/main.py people/people_2027.yaml --person 홍길동
+../../.venv/bin/python ../../src/main.py people/people_2027.yaml --project 연구지원
 ```
 
 다년 사업은 `templates/07_multi_year` 폴더에서 사람 파일만 바꿔 실행한다:
 
 ```bash
-../../.venv/bin/python ../../main.py people/people_2026.yaml --all
-../../.venv/bin/python ../../main.py people/people_2027.yaml --all
-../../.venv/bin/python ../../main.py people/people_2028.yaml --all
+../../.venv/bin/python ../../src/main.py people/people_2026.yaml --all
+../../.venv/bin/python ../../src/main.py people/people_2027.yaml --all
+../../.venv/bin/python ../../src/main.py people/people_2028.yaml --all
 ```
 
 오류 사례는 폴더 깊이가 한 단계 더 깊다. 저장소 루트에서 시작하는 예:
 
 ```bash
 cd templates/errors/12_joint_capacity
-../../../.venv/bin/python ../../../main.py people/people_2027.yaml --all
+../../../.venv/bin/python ../../../src/main.py people/people_2027.yaml --all
 ```
 
-Windows에서는 `python`으로 실행하거나 `.venv/Scripts/python.exe` 경로를 사용한다. 예를 들어 `01_basic` 폴더에서는 `../../.venv/Scripts/python.exe ../../main.py people/people_2027.yaml --all`로 실행한다.
+Windows에서는 `python`으로 실행하거나 `.venv/Scripts/python.exe` 경로를 사용한다. 예를 들어 `01_basic` 폴더에서는 `../../.venv/Scripts/python.exe ../../src/main.py people/people_2027.yaml --all`로 실행한다.
 
 ## 사례별 예상 결과
 

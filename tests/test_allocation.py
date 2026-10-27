@@ -12,14 +12,16 @@ from unittest.mock import patch
 
 import yaml
 
+# src 레이아웃을 설치 없이 테스트합니다. CLI는 src/main.py에서 실행합니다.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'src'))
+
 from allocation.cli import main
 from allocation.engine import BASE, calculate, validate_result
 from allocation.flow import transport
 from allocation.loading import load_inputs
 from allocation.models import amount
 from allocation.rendering import render_result
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def project(alias='사업1', year=2027, excluded=(), limit='10.00000', period=None):
@@ -202,7 +204,7 @@ class AcceptanceTests(unittest.TestCase):
                 [person({'사업1': '0.60000', '사업2': '0.40000'})])
 
     def cli(self, *args):
-        return subprocess.run([sys.executable, str(ROOT / 'main.py'), str(self.path / 'people.yaml'), *args],
+        return subprocess.run([sys.executable, str(ROOT / 'src/main.py'), str(self.path / 'people.yaml'), *args],
                               cwd=self.path, capture_output=True, text=True)
 
     def test_T18_cli_views(self):

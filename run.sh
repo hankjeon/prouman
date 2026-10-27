@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 실행한 작업 디렉터리는 유지하고, 저장소의 main.py를 호출합니다.
+# 실행한 작업 디렉터리는 유지하고, 저장소의 src/main.py를 호출합니다.
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit 1
 
@@ -45,4 +45,4 @@ if [[ ! -x "$venv_dir/bin/python" ]]; then
 fi
 
 # 배열 인자를 그대로 전달하고 Python의 종료 코드를 보존합니다.
-exec "$venv_dir/bin/python" "$script_dir/main.py" "$@"
+exec "$venv_dir/bin/python" "$script_dir/src/main.py" "$@"
