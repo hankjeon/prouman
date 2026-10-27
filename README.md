@@ -66,6 +66,8 @@ Windows에서는 `python3` 대신 `python`, `.venv/bin/python` 대신 `.venv\Scr
 사업2 (운영 사업): 1.50000 / 1.15000 / 0.35000
 ```
 
+입력 YAML은 UTF-8(BOM 허용)을 권장하며, Windows 메모장의 ANSI 등 CP949로 저장한 파일도 읽는다. 상세 규칙은 [데이터 모델](docs/data-model.md#공통-규약)에 있다.
+
 사업명은 앞뒤 공백을 제거하고 중간 공백은 유지한다. 사업약칭은 앞뒤 공백을 제거한 뒤 내부 공백을 허용하지 않는다. 약칭의 중복 검사·참조·조회에도 이 규칙을 적용한다.
 
 사람 또는 사업 전체만 조회하는 예:
@@ -89,7 +91,7 @@ Linux에서는 같은 인자를 `./run.sh`에 전달한다. `--person`, `--proje
 - `src/allocation/flow.py`: 정수 최대 흐름 및 균등 초안을 참고한 재배치
 - `src/allocation/engine.py`: 공백·허용 월 계산, 사전·사후 검증
 - `src/allocation/rendering.py`: 진단·요약·상세표 출력
-- `tests/test_allocation.py`: T01~T26, 경계 입력, 결정성, 완전 탐색 비교
+- `tests/test_allocation.py`: T01~T27, 경계 입력, 결정성, 완전 탐색 비교
 
 ## 테스트
 

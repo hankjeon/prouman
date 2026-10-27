@@ -441,6 +441,25 @@ class AcceptanceTests(unittest.TestCase):
             self.assertIsNone(inputs, literal)
             self.assertIn('E005', [i.code for i in issues])
 
+    def test_T27_input_encodings(self):
+        paths = self.write([project('연구사업'), project('운영사업')],
+                           [person({'연구사업': '0.60000', '운영사업': '0.40000'}, name='홍길동')])
+        texts = [p.read_text(encoding='utf-8') for p in paths]
+        expected, _ = self.run_files(paths)
+        for encodings in (('cp949', 'cp949'), ('utf-8-sig', 'utf-8-sig'), ('cp949', 'utf-8')):
+            with self.subTest(encodings=encodings):
+                for path, text, encoding in zip(paths, texts, encodings):
+                    path.write_text(text, encoding=encoding)
+                result, issues = self.run_files(paths)
+                self.assertIsNotNone(result, issues)
+                self.assertFalse(result.has_errors, result.issues)
+                self.assertEqual(result.allocations, expected.allocations)
+        # UTF-8과 CP949 어느 쪽으로도 해석할 수 없는 바이트는 E001이다.
+        paths[1].write_bytes(texts[1].encode('utf-8') + b'# \xff\n')
+        inputs, issues = load_inputs(*paths)
+        self.assertIsNone(inputs)
+        self.assertIn('E001', [i.code for i in issues])
+
     def test_schema_errors_aggregate(self):
         p = project()
         p['id'] = 1

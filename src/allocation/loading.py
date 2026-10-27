@@ -1,4 +1,5 @@
 """YAML 숫자를 float로 구성하지 않고 원문으로 검증한다."""
+import io
 import re
 from datetime import date
 from decimal import Decimal, localcontext
@@ -63,6 +64,14 @@ Loader.add_constructor('tag:yaml.org,2002:float', lambda loader, node: Number(no
 Loader.add_constructor('tag:yaml.org,2002:timestamp', lambda loader, node: Number(node.value, 'timestamp'))
 
 
+def decode_text(data):
+    # UTF-8(BOM 허용)을 먼저 시도한다. 한글이 든 UTF-8은 CP949로 오인되지 않지만 그 반대는 가능하므로 순서를 바꾸지 않는다.
+    try:
+        return data.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return data.decode('cp949')
+
+
 class Validator:
     def __init__(self):
         self.issues = []
@@ -75,17 +84,18 @@ class Validator:
 
     def read(self, path):
         try:
-            with Path(path).open(encoding='utf-8') as stream:
-                loader = Loader(stream)
-                try:
-                    value = loader.get_single_data()
-                    for line, key in loader.duplicates:
-                        self.error('E002', f'{path}:{line}', key, '중복 없는 mapping 키')
-                    return value
-                finally:
-                    loader.dispose()
+            stream = io.StringIO(decode_text(Path(path).read_bytes()))
+            stream.name = str(path)  # YAML 오류 위치에 파일 경로를 표시한다.
+            loader = Loader(stream)
+            try:
+                value = loader.get_single_data()
+                for line, key in loader.duplicates:
+                    self.error('E002', f'{path}:{line}', key, '중복 없는 mapping 키')
+                return value
+            finally:
+                loader.dispose()
         except (OSError, UnicodeError, yaml.YAMLError, RecursionError) as exc:
-            self.error('E001', str(path), str(exc), '읽을 수 있는 UTF-8 단일 YAML 문서')
+            self.error('E001', str(path), str(exc), 'UTF-8 또는 CP949로 읽을 수 있는 단일 YAML 문서')
             return MISSING
 
     def mapping(self, value, where, required, optional=()):
