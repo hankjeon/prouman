@@ -242,7 +242,7 @@ class AcceptanceTests(unittest.TestCase):
                               cwd=self.path, capture_output=True, text=True)
 
     def test_T18_cli_views(self):
-        self.write([project()], [person()])
+        self.write([project(), project('사업2')], [person(), person({'사업2': '1'}, name='김철수')])
         for args, text in (((), '개인별 연간 요약'), (('--person', '홍길동'), '개인 상세: 홍길동'),
                            (('--project', '사업1'), '사업 상세: 사업1'), (('--all',), '개인 상세: 홍길동')):
             with self.subTest(args=args):
@@ -250,11 +250,33 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
                 self.assertIn(text, p.stdout)
                 self.assertIn('1.00000', p.stdout)
+                for summary in ('개인별 연간 요약', '사업별 연간 요약'):
+                    if not args or args == ('--all',):
+                        self.assertIn(summary, p.stdout)
+                    else:
+                        self.assertNotIn(summary, p.stdout)
+                if args and args[0] in ('--person', '--project'):
+                    self.assertNotIn('김철수', p.stdout)
+                    self.assertNotIn('사업2', p.stdout)
+                if args and args[0] == '--project':
+                    self.assertIn('연간 배정: 10.00000 / 할당: 1.00000 / 잔여: 9.00000', p.stdout)
         for flag in ('--person', '--project'):
             p = self.cli(flag, '없음')
             self.assertEqual(p.returncode, 1)
             self.assertIn('E008', p.stdout)
             self.assertNotIn('개인별 연간 요약', p.stdout)
+
+    def test_selected_views_keep_validation_warnings(self):
+        self.write([project(excluded=[4, 4]), project('사업2')],
+                   [person({'사업1': '0.60000', '사업2': '0.40000'})])
+        for args in (('--person', '홍길동'), ('--project', '사업1')):
+            with self.subTest(args=args):
+                p = self.cli(*args)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn('[WARNING W001]', p.stdout)
+                self.assertIn('ERROR: 0건 / WARNING: 1건', p.stdout)
+                self.assertNotIn('개인별 연간 요약', p.stdout)
+                self.assertNotIn('사업별 연간 요약', p.stdout)
 
     def test_T19_warnings(self):
         p = project(excluded=[4, 4])
