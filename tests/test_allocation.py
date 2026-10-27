@@ -312,9 +312,26 @@ class AcceptanceTests(unittest.TestCase):
         p = project()
         p['id'] = 1
         p['period'] = '잘못된 날짜'
-        del p['yearly'][2027]['excluded_months']
+        del p['yearly'][2027]['allocated_manpower']
         issues = self.bad([p])
         self.assertGreaterEqual(len(issues), 3)
+
+    def test_omitted_excluded_months_matches_empty_list(self):
+        explicit = self.ok()
+        p = project()
+        del p['yearly'][2027]['excluded_months']
+        omitted = self.ok([p])
+        self.assertEqual(omitted.issues, [])
+        self.assertEqual(omitted.inputs.projects['사업1'].yearly[2027].excluded, frozenset())
+        self.assertEqual(omitted.allocations, explicit.allocations)
+        self.assertEqual(omitted.allocations['홍길동']['사업1'], list(BASE))
+
+    def test_present_excluded_months_still_requires_list(self):
+        for value in (None, 4, '4', {}):
+            with self.subTest(value=value):
+                p = project()
+                p['yearly'][2027]['excluded_months'] = value
+                self.bad([p], code='E003')
 
     def test_duplicate_year_values_never_overwrite(self):
         paths = self.write([project()], [person()])

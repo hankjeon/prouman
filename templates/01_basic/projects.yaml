@@ -6,4 +6,4 @@ projects:
     yearly:
       2027:  # 연도 키는 따옴표 없는 정수입니다.
         allocated_manpower: "1.00000"  # 연간 상한입니다. 반드시 소진할 필요는 없습니다.
-        excluded_months: []  # 제외 월이 없어도 필수 필드입니다.
+        # excluded_months는 생략하면 제외 월 없음으로 처리합니다. []로 명시해도 같습니다.

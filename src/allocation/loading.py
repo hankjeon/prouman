@@ -151,10 +151,10 @@ class Validator:
             for key, raw_budget in yearly.items():
                 loc = f'{where}.yearly[{key}]'
                 year = self.integer(key, loc, 1000, 9999)
-                budget = self.mapping(raw_budget, loc, {'allocated_manpower', 'excluded_months'})
+                budget = self.mapping(raw_budget, loc, {'allocated_manpower'}, {'excluded_months'})
                 limit = self.quantity(budget.get('allocated_manpower', MISSING), loc + '.allocated_manpower')
                 excluded = set()
-                for raw_month in self.sequence(budget.get('excluded_months', MISSING), loc + '.excluded_months'):
+                for raw_month in self.sequence(budget.get('excluded_months', []), loc + '.excluded_months'):
                     month = self.integer(raw_month, loc + '.excluded_months', 0, 12)
                     if month:
                         if month in excluded:
