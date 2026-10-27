@@ -1,6 +1,7 @@
 import copy
 import io
 import itertools
+import os
 import random
 import subprocess
 import sys
@@ -238,8 +239,10 @@ class AcceptanceTests(unittest.TestCase):
                 [person({'사업1': '0.60000', '사업2': '0.40000'})])
 
     def cli(self, *args):
+        # Windows 기본 인코딩(cp949)이나 사용자의 PYTHONIOENCODING과 관계없이 자식 출력과 디코딩을 UTF-8로 맞춘다.
+        env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
         return subprocess.run([sys.executable, str(ROOT / 'src/main.py'), str(self.path / 'people.yaml'), *args],
-                              cwd=self.path, capture_output=True, text=True)
+                              cwd=self.path, capture_output=True, text=True, encoding='utf-8', env=env)
 
     def test_T18_cli_views(self):
         self.write([project(), project('사업2')], [person(), person({'사업2': '1'}, name='김철수')])
@@ -500,7 +503,6 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_offline_execution_without_socket(self):
         self.write([project()], [person()])
-        import os
         previous = Path.cwd()
         try:
             os.chdir(self.path)
