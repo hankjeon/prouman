@@ -1,0 +1,98 @@
+# myteam 테스트 데이터: 사업 10개 (생성 seed 2026)
+# 사업 기간은 2024~2027 사이 임의이며 모두 2026년과 겹칩니다.
+# 2026년 배정인력 상한 = 참여자 연간 목표 합계 + 임의 여유분.
+projects:
+  - name: AI 기반 품질 예측 플랫폼 구축
+    alias: AI품질
+    period: "2025-06-04~2026-08-02"
+    yearly:
+      2025:
+        allocated_manpower: "2.54"
+      2026:
+        allocated_manpower: "1.43"
+  - name: 스마트팩토리 데이터 통합
+    alias: 스마트팩토리
+    period: "2026-08-07~2027-09-19"
+    yearly:
+      2026:
+        allocated_manpower: "0.77"
+      2027:
+        allocated_manpower: "2.78"
+  - name: 차세대 ERP 고도화
+    alias: ERP고도화
+    period: "2025-12-25~2027-03-04"
+    yearly:
+      2025:
+        allocated_manpower: "3.42"
+      2026:
+        allocated_manpower: "2.05"
+      2027:
+        allocated_manpower: "1.61"
+  - name: 클라우드 전환 1단계
+    alias: 클라우드전환
+    period: "2026-08-31~2027-10-09"
+    yearly:
+      2026:
+        allocated_manpower: "1.28"
+      2027:
+        allocated_manpower: "3.65"
+  - name: 고객 포털 리뉴얼
+    alias: 고객포털
+    period: "2024-08-26~2027-09-27"
+    yearly:
+      2024:
+        allocated_manpower: "2.26"
+      2025:
+        allocated_manpower: "2.83"
+      2026:
+        allocated_manpower: "1.62"
+      2027:
+        allocated_manpower: "3.33"
+  - name: 보안 관제 체계 개선
+    alias: 보안관제
+    period: "2026-04-28~2027-02-04"
+    yearly:
+      2026:
+        allocated_manpower: "1.52"
+      2027:
+        allocated_manpower: "2.76"
+  - name: 모바일 현장 업무 지원
+    alias: 모바일현장
+    period: "2024-12-17~2026-09-22"
+    yearly:
+      2024:
+        allocated_manpower: "1.42"
+      2025:
+        allocated_manpower: "1.35"
+      2026:
+        allocated_manpower: "2.34"
+  - name: 빅데이터 분석 기반 마련
+    alias: 빅데이터
+    period: "2025-01-18~2027-03-03"
+    yearly:
+      2025:
+        allocated_manpower: "1.44"
+      2026:
+        allocated_manpower: "1.94"
+      2027:
+        allocated_manpower: "2.59"
+  - name: 디지털 문서 관리 시스템
+    alias: 문서관리
+    period: "2025-04-15~2027-12-13"
+    yearly:
+      2025:
+        allocated_manpower: "2.35"
+      2026:
+        allocated_manpower: "3.15"
+      2027:
+        allocated_manpower: "2.15"
+  - name: IoT 설비 모니터링
+    alias: 설비모니터링
+    period: "2025-04-13~2027-09-13"
+    yearly:
+      2025:
+        allocated_manpower: "1.86"
+      2026:
+        allocated_manpower: "2.32"
+      2027:
+        allocated_manpower: "3.21"
