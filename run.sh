@@ -5,12 +5,14 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit 1
 
 if [[ $# -eq 0 ]]; then
     cat <<'USAGE'
-사용법: ./run.sh <사람 YAML 파일> [--person 이름 | --project 사업약칭 | --all]
+사용법: ./run.sh <사람 YAML 파일> [--person 이름 | --project 사업약칭 | --all-people | --all-projects | --all]
 
 예시 (저장소 루트에서 실행):
   ./run.sh people/people_2027.yaml
   ./run.sh people/people_2027.yaml --person "홍길동"
   ./run.sh people/people_2027.yaml --project "사업1"
+  ./run.sh people/people_2027.yaml --all-people    # 사람 전체 상세
+  ./run.sh people/people_2027.yaml --all-projects  # 사업 전체 상세
   ./run.sh people/people_2027.yaml --all
 
 템플릿 실행:

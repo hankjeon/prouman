@@ -13,6 +13,8 @@ def main(argv=None):
     group.add_argument('--person', help='정확히 일치하는 사람 이름')
     group.add_argument('--project', help='사업약칭 (앞뒤 공백 제거)')
     group.add_argument('--all', action='store_true', dest='show_all', help='전체 요약과 모든 개인·사업 상세')
+    group.add_argument('--all-people', action='store_true', help='전체 개인 상세만 표시')
+    group.add_argument('--all-projects', action='store_true', help='전체 사업 상세만 표시')
     args = parser.parse_args(argv)
     inputs, issues = load_inputs('projects.yaml', args.people_file)
     if inputs is None:
@@ -28,5 +30,6 @@ def main(argv=None):
         issues.append(Issue('ERROR', 'E008', '--person', repr(args.person), '등록된 사람 이름',
                             '사람 파일의 name을 확인하세요.'))
     result = calculate(inputs, issues)
-    print(render_result(result, args.person, args.project, args.show_all))
+    print(render_result(result, args.person, args.project, args.show_all,
+                        all_people=args.all_people, all_projects=args.all_projects))
     return 1 if result.has_errors else 0

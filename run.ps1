@@ -6,12 +6,14 @@ $programArgs = @($args)
 
 if ($programArgs.Count -eq 0) {
     Write-Output @'
-사용법: .\run.ps1 <사람 YAML 파일> [--person 이름 | --project 사업약칭 | --all]
+사용법: .\run.ps1 <사람 YAML 파일> [--person 이름 | --project 사업약칭 | --all-people | --all-projects | --all]
 
 예시 (저장소 루트에서 실행):
   .\run.ps1 people\people_2027.yaml
   .\run.ps1 people\people_2027.yaml --person "홍길동"
   .\run.ps1 people\people_2027.yaml --project "사업1"
+  .\run.ps1 people\people_2027.yaml --all-people    # 사람 전체 상세
+  .\run.ps1 people\people_2027.yaml --all-projects  # 사업 전체 상세
   .\run.ps1 people\people_2027.yaml --all
 
 템플릿 실행:

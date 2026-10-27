@@ -305,6 +305,40 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertNotIn('개인별 연간 요약', p.stdout)
                 self.assertNotIn('사업별 연간 요약', p.stdout)
 
+    def test_category_all_views_show_only_requested_details(self):
+        self.write([project(), project('사업2'), project('미할당사업', limit='0')],
+                   [person(), person({'사업2': '1'}, name='김철수')])
+        for flag, expected, omitted, count in (
+                ('--all-people', '개인 상세:', '사업 상세:', 2),
+                ('--all-projects', '사업 상세:', '개인 상세:', 3)):
+            with self.subTest(flag=flag):
+                p = self.cli(flag)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertEqual(p.stdout.count(expected), count)
+                self.assertNotIn(omitted, p.stdout)
+                self.assertNotIn('개인별 연간 요약', p.stdout)
+                self.assertNotIn('사업별 연간 요약', p.stdout)
+                self.assertIn('[WARNING W005]', p.stdout)
+                self.assertIn('12월 | 연간', p.stdout)
+                self.assertNotIn('분기', p.stdout)
+                if flag == '--all-people':
+                    self.assertIn('개인 상세: 김철수', p.stdout)
+                    self.assertIn('개인 상세: 홍길동', p.stdout)
+                else:
+                    self.assertIn('사업 상세: 미할당사업 (미할당사업)', p.stdout)
+                    self.assertIn('사업 상세: 사업1 (사업1)', p.stdout)
+                    self.assertIn('사업 상세: 사업2 (사업2)', p.stdout)
+
+    def test_category_all_views_do_not_print_invalid_results(self):
+        self.write([project()], [person({'사업1': '0.90000'})])
+        for flag in ('--all-people', '--all-projects'):
+            with self.subTest(flag=flag):
+                p = self.cli(flag)
+                self.assertEqual(p.returncode, 1)
+                self.assertIn('E101', p.stdout)
+                self.assertNotIn('개인 상세:', p.stdout)
+                self.assertNotIn('사업 상세:', p.stdout)
+
     def test_T19_warnings(self):
         p = project(excluded=[4, 4])
         p['yearly'][2026] = dict(allocated_manpower='0', excluded_months=[])
@@ -359,10 +393,12 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_T25_options_and_monthly_annual_output(self):
         self.write([project()], [person()])
-        for args in (('--all', '--person', '홍길동'), ('--all', '--project', '사업1'),
-                     ('--person', '홍길동', '--project', '사업1')):
-            self.assertEqual(self.cli(*args).returncode, 2)
-        for args in (('--all',), ('--person', '홍길동'), ('--project', '사업1')):
+        options = (('--all',), ('--person', '홍길동'), ('--project', '사업1'),
+                   ('--all-people',), ('--all-projects',))
+        for first, second in itertools.combinations(options, 2):
+            with self.subTest(first=first, second=second):
+                self.assertEqual(self.cli(*first, *second).returncode, 2)
+        for args in options:
             with self.subTest(args=args):
                 p = self.cli(*args)
                 self.assertEqual(p.returncode, 0, p.stderr)
