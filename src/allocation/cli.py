@@ -12,7 +12,7 @@ def main(argv=None):
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--person', help='정확히 일치하는 사람 이름')
     group.add_argument('--project', help='사업약칭 (앞뒤 공백 제거)')
-    group.add_argument('--all', action='store_true', dest='show_all', help='모든 개인 상세')
+    group.add_argument('--all', action='store_true', dest='show_all', help='전체 요약과 모든 개인·사업 상세')
     args = parser.parse_args(argv)
     inputs, issues = load_inputs('projects.yaml', args.people_file)
     if inputs is None:

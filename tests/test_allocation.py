@@ -260,11 +260,38 @@ class AcceptanceTests(unittest.TestCase):
                     self.assertNotIn('사업2', p.stdout)
                 if args and args[0] == '--project':
                     self.assertIn('연간 배정: 10.00000 / 할당: 1.00000 / 잔여: 9.00000', p.stdout)
+                if not args:
+                    self.assertNotIn('개인 상세:', p.stdout)
+                    self.assertNotIn('사업 상세:', p.stdout)
+                elif args[0] == '--person':
+                    self.assertNotIn('사업 상세:', p.stdout)
+                elif args[0] == '--project':
+                    self.assertNotIn('개인 상세:', p.stdout)
         for flag in ('--person', '--project'):
             p = self.cli(flag, '없음')
             self.assertEqual(p.returncode, 1)
             self.assertIn('E008', p.stdout)
             self.assertNotIn('개인별 연간 요약', p.stdout)
+
+    def test_all_displays_every_person_and_project_with_section_breaks(self):
+        self.write([project(), project('사업2'), project('미할당사업', limit='0')],
+                   [person(), person({'사업2': '1'}, name='김철수')])
+        p = self.cli('--all')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        headings = ['개인별 연간 요약 (사업 / 공백 / 합계)', '사업별 연간 요약 (배정 / 할당 / 잔여)',
+                    '개인 상세: 김철수', '개인 상세: 홍길동',
+                    '사업 상세: 미할당사업 (미할당사업)', '사업 상세: 사업1 (사업1)', '사업 상세: 사업2 (사업2)']
+        positions = []
+        lines = p.stdout.splitlines()
+        for heading in headings:
+            self.assertEqual(lines.count(heading), 1)
+            index = lines.index(heading)
+            self.assertEqual(lines[index - 2], '')
+            self.assertRegex(lines[index - 1], r'^-{3,}$')
+            positions.append(index)
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('연간 배정: 0.00000 / 할당: 0.00000 / 잔여: 0.00000', p.stdout)
+        self.assertIn('[WARNING W005]', p.stdout)
 
     def test_selected_views_keep_validation_warnings(self):
         self.write([project(excluded=[4, 4]), project('사업2')],
@@ -345,6 +372,9 @@ class AcceptanceTests(unittest.TestCase):
                                             '7월', '8월', '9월', '10월', '11월', '12월', '연간'])
                 for row in lines[1:]:
                     self.assertEqual(len(row), 14)
+                    if row[0] == '사업/구분':
+                        self.assertEqual(row, lines[0])
+                        continue
                     self.assertEqual(row[-1], '1.00000' if row[0] != '공백' else '0.00000')
         (self.path / 'projects.yaml').unlink()
         p = self.cli()

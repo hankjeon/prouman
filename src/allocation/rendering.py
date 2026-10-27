@@ -22,12 +22,12 @@ def render_result(result, person=None, project=None, show_all=False):
     if result.has_errors:
         return '\n'.join(lines + ['결과: 계산 중단'])
     if person is None and project is None:
-        lines.append('개인별 연간 요약 (사업 / 공백 / 합계)')
+        lines.extend(['', '-' * 72, '개인별 연간 요약 (사업 / 공백 / 합계)'])
         for name, rows in result.allocations.items():
             total = sum(sum(row) for row in rows.values())
             absence = sum(result.absence[name])
             lines.append(f'{name}: {amount(total)} / {amount(absence)} / {amount(total + absence)}')
-        lines.append('사업별 연간 요약 (배정 / 할당 / 잔여)')
+        lines.extend(['', '-' * 72, '사업별 연간 요약 (배정 / 할당 / 잔여)'])
         for alias, item in inputs.projects.items():
             budget = item.yearly.get(inputs.year)
             limit = budget.limit if budget else 0
@@ -37,20 +37,21 @@ def render_result(result, person=None, project=None, show_all=False):
     header = ' | '.join(['사업/구분', *(f'{m}월' for m in range(1, 13)), '연간'])
     names = list(inputs.people) if show_all else [person] if person is not None else []
     for name in names:
-        lines.extend([f'개인 상세: {name}', header])
+        lines.extend(['', '-' * 72, f'개인 상세: {name}', header])
         rows = result.allocations[name]
         for alias in sorted(rows):
             lines.append(table_row(alias, rows[alias]))
         lines.append(table_row('공백', result.absence[name]))
         totals = [result.absence[name][m] + sum(row[m] for row in rows.values()) for m in range(12)]
         lines.append(table_row('합계', totals))
-    if project is not None:
-        item = inputs.projects[project]
-        totals = [sum(rows.get(project, [0] * 12)[m] for rows in result.allocations.values()) for m in range(12)]
+    projects = list(inputs.projects) if show_all else [project] if project is not None else []
+    for alias in projects:
+        item = inputs.projects[alias]
+        totals = [sum(rows.get(alias, [0] * 12)[m] for rows in result.allocations.values()) for m in range(12)]
         budget = item.yearly.get(inputs.year)
         limit = budget.limit if budget else 0
         total = sum(totals)
-        lines.extend([f'사업 상세: {project} ({item.name})',
+        lines.extend(['', '-' * 72, f'사업 상세: {alias} ({item.name})',
                       f'연간 배정: {amount(limit)} / 할당: {amount(total)} / 잔여: {amount(limit - total)}'
                       + (' (배정 미등록)' if budget is None else ''), header])
         lines.append(table_row('할당', totals))
