@@ -1,0 +1,18 @@
+projects:
+  - name: 연구 지원 사업
+    alias: 사업1
+    period: "2026-04-15~2028-09-10"
+    yearly:
+      2027:
+        allocated_manpower: "1.50000"
+        excluded_months: [4, 5, 6]
+      2028:
+        allocated_manpower: "1.00000"
+        excluded_months: [0, 0, 0]
+  - name: 운영 사업
+    alias: 사업2
+    period: "2025-01-01~2029-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "1.50000"
+        excluded_months: []

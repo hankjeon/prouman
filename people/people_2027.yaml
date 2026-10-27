@@ -1,0 +1,11 @@
+year: 2027
+people:
+  - name: 홍길동
+    allocations:
+      사업1: "0.60000"
+      사업2: "0.40000"
+  - name: 김철수
+    absences:
+      - period: "2027-07-01~2027-09-30"
+    allocations:
+      사업2: "0.75000"

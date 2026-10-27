@@ -1,0 +1,16 @@
+# 의도적 오류 E004: 앞뒤 공백을 제거한 두 약칭이 같아집니다.
+projects:
+  - name: 첫 번째 연구 사업
+    alias: 연구지원
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "1.00000"
+        excluded_months: []
+  - name: 두 번째 연구 사업
+    alias: " 연구지원 "  # 수정 시 고유한 약칭을 쓰고 사람 파일의 참조도 맞추세요.
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "1.00000"
+        excluded_months: []

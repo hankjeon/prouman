@@ -1,0 +1,23 @@
+# 여러 사람이 여러 사업에 참여합니다. 배정인력은 사람들의 목표 합계 이상이어야 합니다.
+projects:
+  - name: 기반 기술 연구
+    alias: 기반연구
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "1.50000"  # 실제 목표 합계 1.10000, 잔여 0.40000.
+        excluded_months: []
+  - name: 현장 실증 사업
+    alias: 현장실증
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "1.00000"  # 목표 합계 0.90000.
+        excluded_months: []
+  - name: 공통 운영 지원
+    alias: 공통운영
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "1.00000"  # 목표 합계 1.00000으로 상한과 같습니다.
+        excluded_months: []

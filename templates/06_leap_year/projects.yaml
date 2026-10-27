@@ -1,0 +1,9 @@
+# 2028년은 윤년입니다. 2월은 29일로 계산합니다.
+projects:
+  - name: 윤년 운영 사업
+    alias: 운영
+    period: "2028-01-01~2028-12-31"
+    yearly:
+      2028:
+        allocated_manpower: "1.00000"
+        excluded_months: []

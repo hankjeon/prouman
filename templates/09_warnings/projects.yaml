@@ -1,0 +1,30 @@
+# 의도적인 경고 예제: 경고가 있어도 유효한 배분은 성공 종료합니다.
+projects:
+  - name: 연중 운영
+    alias: 운영
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "2.00000"
+        excluded_months: []
+  - name: 참고 연구
+    alias: 참고연구
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2026:  # W002: 사업 기간 밖의 연도 정보.
+        allocated_manpower: "0.00000"
+        excluded_months: []
+      2027:
+        allocated_manpower: "1.00000"
+        excluded_months: [0, 4, 4]  # W001: 4월은 한 번만 제외, 0은 무시.
+  - name: 배정 대기 사업
+    alias: 배정대기
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "0.00000"  # W005: 양수 목표가 없으므로 경고만 발생.
+        excluded_months: []
+  - name: 차년도 예정 사업
+    alias: 차년도
+    period: "2028-01-01~2028-12-31"
+    yearly: {}  # W005: 2027년 정보 미등록. 양수 목표가 없어 계산 계속.

@@ -1,0 +1,9 @@
+# 휴직은 사업 기간과 달리 실제 달력 일수에 비례합니다.
+projects:
+  - name: 상시 운영 지원
+    alias: 운영
+    period: "2026-01-01~2026-12-31"
+    yearly:
+      2026:
+        allocated_manpower: "3.00000"  # 네 사람의 사업 목표 합계는 2.53764입니다.
+        excluded_months: []

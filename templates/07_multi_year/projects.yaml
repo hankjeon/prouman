@@ -1,0 +1,28 @@
+# 공통 사업 파일 하나를 여러 연도의 사람 파일과 함께 사용합니다.
+projects:
+  - name: 다년간 기술 개발
+    alias: 기술개발
+    period: "2026-04-15~2028-09-10"
+    yearly:
+      2026:
+        allocated_manpower: "1.00000"
+        excluded_months: []
+      2027:
+        allocated_manpower: "1.00000"
+        excluded_months: [4, 5, 6]  # 제외 월은 해당 연도에만 적용됩니다.
+      2028:
+        allocated_manpower: "1.00000"
+        excluded_months: []
+  - name: 연중 운영 사업
+    alias: 운영
+    period: "2026-01-01~2028-12-31"
+    yearly:
+      2026:
+        allocated_manpower: "1.00000"
+        excluded_months: []
+      2027:
+        allocated_manpower: "1.00000"
+        excluded_months: []
+      2028:
+        allocated_manpower: "1.00000"
+        excluded_months: []

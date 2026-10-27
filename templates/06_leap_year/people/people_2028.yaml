@@ -1,0 +1,9 @@
+# 예상: 2월 공백 ROUND_HALF_UP(0.08333 / 29) = 0.00287.
+year: 2028
+people:
+  - name: 윤년휴직자
+    absences:
+      - period: "2028-02-29~2028-02-29"  # 하루 휴직, 양 끝 날짜 포함.
+        reason: 윤년 하루 휴직
+    allocations:
+      운영: "0.99713"

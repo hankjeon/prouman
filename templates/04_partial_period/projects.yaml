@@ -1,0 +1,16 @@
+# 사업 기간은 월 단위로 판단합니다. 4월 15일 시작이어도 4월 전체가 허용됩니다.
+projects:
+  - name: 상반기 착수 실증
+    alias: 기간사업
+    period: "2027-04-15~2027-09-10"  # 4~9월 허용, 그 밖의 월은 0.
+    yearly:
+      2027:
+        allocated_manpower: "0.50000"
+        excluded_months: []
+  - name: 연중 운영 지원
+    alias: 연중운영
+    period: "2027-01-01~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "0.50000"
+        excluded_months: []

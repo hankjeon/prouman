@@ -1,59 +1,102 @@
-# 인력할당 1차 개발 문서
+# 인력할당 오프라인 CLI
 
-이 문서 세트는 인력할당 프로그램의 1차 요구사항을 Codex 구현 기준으로 정리한 것이다. 특히 월별 인력 직접 입력 및 사업 기간의 일수 비례 계산 제안은 최종 규칙이 아니다.
+사람별·사업별 연간 할당 목표를 월별로 배분하는 Python CLI다. 입력한 연간 목표를 유지하면서 월별 가용량, 휴직, 사업 기간, 제외 월, 사업별 연간 배정 상한을 검증한다. 오류가 있으면 최종 할당표를 출력하지 않는다.
 
-## 목적과 범위
+Python 3.10 이상과 PyYAML 6.0.3을 사용한다. 이번 구현은 Python 3.12에서 검증했다. 실행 시 인터넷이나 서버는 필요하지 않다. GUI, 그래프, Excel/CSV 출력, 연간 목표 자동 결정은 후속 범위다.
 
-사용자가 사람별·사업별 **연간 할당인력**을 결정한다. Python 오프라인 CLI가 이를 할당 가능한 월에 기본적으로 균등하게 나눈다. 입력한 연간 목표량은 바꾸지 않고, 월별 가용량, 휴직, 사업 기간, 제외 월, 사업별 연간 배정인력 상한을 모두 만족하도록 필요한 만큼 월별 값을 조정한다. 제곱편차의 전역 최솟값은 요구하지 않는다. 불가능하거나 논리적으로 모순되면 `ERROR`를 내고 해당 연도 최종 할당표 생성을 중단한다.
+## 설치
 
-1차 범위: YAML 로드·무결성 검사, 한 연도 계산, 개인/사업별 월·분기·연간 집계, 텍스트 CLI 출력. 인터넷 연결 없이 실행하며 GUI, 그래프, Excel/CSV 내보내기, 사업 우선순위에 따른 연간 참여율 자동 결정은 후속 범위다.
+저장소 루트에서 실행한다. 온라인 설치:
 
-## 문서 읽는 순서
-
-1. [requirements.md](docs/requirements.md): 기능과 수용 기준
-2. [data-model.md](docs/data-model.md): 두 YAML 파일의 최종 입력 형식
-3. [allocation-algorithm.md](docs/allocation-algorithm.md): 계산식과 균등 배분 절차
-4. [validation.md](docs/validation.md): `ERROR`/`WARNING` 판정
-5. [test-cases.md](docs/test-cases.md): 구현 검증 사례
-6. [AGENTS.md](AGENTS.md): Codex 작업 지침
-
-## 예정 디렉터리와 실행 방식
-
-```text
-manpower-allocation/
-  AGENTS.md
-  README.md
-  docs/
-    requirements.md
-    data-model.md
-    allocation-algorithm.md
-    validation.md
-    test-cases.md
-  projects.yaml                 # 구현·입력 준비 시 생성
-  people/
-    people_2027.yaml            # 구현·입력 준비 시 생성
-  main.py                       # Codex 구현 대상
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-예정 CLI 계약은 다음과 같다. 현재 폴더에는 **구현 코드와 실제 YAML 데이터가 아직 없으므로** 아래 명령은 문서상의 목표 사용법이다.
+오프라인 설치용 파일은 대상 환경과 같은 Python 버전·운영체제·CPU 환경에서 먼저 준비한다:
+
+```bash
+python3 -m pip download --only-binary=:all: --no-deps -r requirements.txt -d .wheels
+```
+
+저장소와 `.wheels` 디렉터리를 대상 환경으로 옮긴 뒤, 외부 패키지 인덱스 없이 설치한다:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --no-index --find-links=.wheels -r requirements.txt
+```
+
+Windows에서는 `python3` 대신 `python`, `.venv/bin/python` 대신 `.venv\Scripts\python.exe`를 사용한다. wheel은 환경에 맞게 다시 준비해야 하며 `.wheels`와 `.venv`는 Git에 포함하지 않는다.
+
+## 실행
+
+저장소 루트에 동작 가능한 예제 `projects.yaml`과 `people/people_2027.yaml`이 있다. 실제 업무 데이터로 교체하기 전에 예제로 실행할 수 있다.
+
+```bash
+.venv/bin/python main.py people/people_2027.yaml
+.venv/bin/python main.py people/people_2027.yaml --person 홍길동
+.venv/bin/python main.py people/people_2027.yaml --project 사업1
+.venv/bin/python main.py people/people_2027.yaml --all
+```
+
+사업 파일은 **현재 실행 작업 디렉터리의 `projects.yaml`**이다. 사람 파일 경로는 위치 인자이며, 관리 연도는 파일명이 아니라 파일 안의 `year`에서 읽는다. 조회 옵션 세 개는 함께 사용할 수 없다.
+
+### 실행 스크립트
+
+설치 후 Linux Bash에서는 `run.sh`, Windows PowerShell에서는 `run.ps1`을 사용하면 가상환경을 직접 활성화하지 않아도 된다.
+
+```bash
+./run.sh people/people_2027.yaml --all
+```
 
 ```powershell
-python main.py people/people_2027.yaml
-python main.py people/people_2027.yaml --person 홍길동
-python main.py people/people_2027.yaml --project 사업1
-python main.py people/people_2027.yaml --all
+.\run.ps1 people\people_2027.yaml --all
 ```
 
-기본 실행은 검증 결과와 개인별·사업별 연간 요약을 출력한다. 옵션은 개인 월별표, 사업 월별표, 전체 개인 월별표를 조회한다. 대상 연도는 파일명이 아니라 people 파일 최상위 `year`로 판단한다. `projects.yaml`은 기본적으로 작업 폴더 루트에서 읽고, 계산 엔진과 출력 코드는 분리한다.
+인자가 없으면 사용법을 표시한다. 활성 가상환경(`VIRTUAL_ENV`)이 있으면 그 환경의 Python을 사용하고, 없으면 스크립트가 위치한 저장소의 `.venv`를 활성화한다. 가상환경 생성과 패키지 설치는 위 설치 절차로 먼저 진행한다. 전달한 인자와 프로그램 종료 코드를 그대로 보존하며, 실행 작업 디렉터리도 유지한다. 예를 들어 `templates/01_basic`에서 `../../run.sh people/people_2027.yaml --all` 또는 `..\..\run.ps1 people\people_2027.yaml --all`로 해당 템플릿을 실행할 수 있다.
 
-## Codex에서 작업 시작하기
+기본 출력은 검증 결과와 개인별·사업별 연간 요약이다. 개인 상세는 월·분기·연간 집계와 공백을 표시한다. 사업 조회는 월별 할당 합계와 연간 배정/할당/잔여를 표시한다. 수량은 모두 소수점 5자리다. 성공·경고만 있는 경우 종료 코드 0, 입력·계산 오류는 1, CLI 사용법 오류는 2다.
 
-이 저장소를 Codex의 로컬 작업 폴더로 열거나 Codex Cloud 환경에 연결한다. 루트의 `AGENTS.md`와 `README.md`, `docs/`의 상세 문서를 함께 읽으면 된다. 이 문서들은 구현 전 요구사항 검토용이며, 실제 YAML 입력과 Python 코드는 아직 없다.
+예제의 연간 요약:
 
-Codex에 보낼 **첫 작업 요청** 예시:
+```text
+김철수: 0.75000 / 0.25000 / 1.00000
+홍길동: 1.00000 / 0.00000 / 1.00000
+사업1 (연구 지원 사업): 1.50000 / 0.60000 / 0.90000
+사업2 (운영 사업): 1.50000 / 1.15000 / 0.35000
+```
 
-> 루트의 AGENTS.md와 README.md부터 읽고 docs/requirements.md, docs/data-model.md, docs/allocation-algorithm.md, docs/validation.md, docs/test-cases.md를 검토해줘. 문서 간 모순이나 구현상 불명확한 점을 보고하고, 1차 Python 오프라인 CLI의 구현 계획과 테스트 계획을 제시해줘. 이번 단계에서는 아직 코드를 작성하지 마.
+사업명은 앞뒤 공백을 제거하고 중간 공백은 유지한다. 사업약칭은 앞뒤 공백을 제거한 뒤 내부 공백을 허용하지 않는다. 약칭의 중복 검사·참조·조회에도 이 규칙을 적용한다.
 
-계획을 검토한 다음 구현을 요청한다. 이 순서는 원 대화에서 제안한 요구사항 검토와 구현의 분리를 반영한다.
+## 입력 템플릿
 
-ChatGPT 프로젝트 대화 자체를 Codex가 자동으로 읽는다고 가정하지 않는다. 구현 판단은 저장소에 커밋된 문서를 기준으로 한다.
+[templates/README.md](templates/README.md)에 권장 폴더 구조와 실행 방법을 정리했다. `templates/`에는 기본 배분, 여러 사람·사업, 제외 월, 부분 사업 기간, 휴직, 윤년, 다년 사업, 공백 처리, 경고·오류 등 17개 사례의 주석 달린 YAML 예제가 있다. 각 사례 폴더를 작업 디렉터리로 사용하며, `errors/`의 입력은 의도적으로 실패하는 참고 자료다.
+
+## 구성
+
+- `main.py`, `allocation/cli.py`: CLI 진입점과 조회 인자
+- `allocation/loading.py`: 안전한 YAML 로드, 원문 숫자·중복 키·스키마 검증
+- `allocation/models.py`: 입력·결과·진단 모델과 고정 소수 출력
+- `allocation/flow.py`: 정수 최대 흐름 및 균등 초안을 참고한 재배치
+- `allocation/engine.py`: 공백·허용 월 계산, 사전·사후 검증
+- `allocation/rendering.py`: 진단·요약·상세표 출력
+- `tests/test_allocation.py`: T01~T26, 경계 입력, 결정성, 완전 탐색 비교
+
+## 테스트
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+표준 라이브러리 `unittest`를 사용한다. 모든 성공 fixture는 반복 실행과 YAML 항목 순서 변경 결과를 비교한다. 작은 정수 흐름 문제 200개는 완전 탐색과 비교하며, 외부 소켓을 금지한 상태에서 CLI도 검증한다. 테스트는 임시 YAML을 사용하고 예제 파일을 수정하지 않는다.
+
+## 요구사항 문서
+
+1. [기능과 수용 기준](docs/requirements.md)
+2. [YAML 데이터 모델](docs/data-model.md)
+3. [계산식과 배분 절차](docs/allocation-algorithm.md)
+4. [검증과 오류 코드](docs/validation.md)
+5. [수용 테스트 사례](docs/test-cases.md)
+6. [Codex 작업 지침](AGENTS.md)
+
+월별 직접 입력, 사업 기간의 일수 비례 상한, 사업 배정인력 완전 소진은 요구하지 않는다. 구현 기준은 이 저장소의 문서이며 외부 대화 내용을 자동으로 읽는다고 가정하지 않는다.
