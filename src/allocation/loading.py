@@ -24,6 +24,16 @@ class Missing:
 MISSING = Missing()
 
 
+def parse_date(value):
+    """하이픈·점 표기를 허용하되 달력 유효성은 date로 검사한다."""
+    for pattern in (r'([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})',
+                    r'([0-9]{4})\.([0-9]{1,2})\.([0-9]{1,2})\.?'):
+        match = re.fullmatch(pattern, value)
+        if match:
+            return date(*(int(part) for part in match.groups()))
+    raise ValueError('지원하지 않는 날짜 형식')
+
+
 class Loader(yaml.SafeLoader):
     def __init__(self, stream):
         super().__init__(stream)
@@ -124,14 +134,15 @@ class Validator:
             return int(Decimal(value) * 100000)
 
     def period(self, value, where):
-        if type(value) is str and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}~[0-9]{4}-[0-9]{2}-[0-9]{2}', value):
+        if type(value) is str:
             try:
-                start, end = (date.fromisoformat(part) for part in value.split('~'))
+                start, end = (parse_date(part) for part in value.split('~'))
                 if start <= end:
                     return start, end
             except ValueError:
                 pass
-        self.error('E006', where, value, '실재하는 날짜의 YYYY-MM-DD~YYYY-MM-DD, 시작일 ≤ 종료일')
+        self.error('E006', where, value,
+                   '실재하는 날짜의 시작일~종료일; YYYY-M-D 또는 YYYY.M.D (끝 점 선택), 시작일 ≤ 종료일')
         return None
 
     def projects(self, value, path):

@@ -185,9 +185,43 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertIn('E002', [i.code for i in issues])
 
     def test_T16_bad_periods(self):
-        for period in ('2027-02-29~2027-03-01', '2027-02-02~2027-02-01', '2027-2-01~2027-03-01'):
+        for period in ('2027-02-29~2027-03-01', '2027-02-02~2027-02-01', '2027/2/1~2027-03-01'):
             p = project(period=period)
             self.bad([p], code='E006')
+
+    def test_date_formats_preserve_project_and_absence_calculation(self):
+        formats = ('{y}-{m:02d}-{d:02d}', '{y}-{m}-{d}',
+                   '{y}.{m:02d}.{d:02d}', '{y}.{m}.{d}', '{y}.{m}.{d}.')
+        baseline = self.ok([project(year=2026)],
+                           [person({'사업1': '0.95430'}, absences=['2026-07-15~2026-07-31'])], 2026)
+        # 시작·종료 표기를 독립적으로 바꿔 사업과 휴직 모두에 적용한다.
+        for start_format, end_format in itertools.product(formats, repeat=2):
+            with self.subTest(start=start_format, end=end_format):
+                def period(m1, d1, m2, d2):
+                    return (start_format.format(y=2026, m=m1, d=d1) + '~'
+                            + end_format.format(y=2026, m=m2, d=d2))
+                r = self.ok([project(year=2026, period=period(1, 1, 12, 31))],
+                            [person({'사업1': '0.95430'}, absences=[period(7, 15, 7, 31)])], 2026)
+                self.assertEqual(r.allocations, baseline.allocations)
+                self.assertEqual(r.absence, baseline.absence)
+
+    def test_dotted_leap_day_and_equal_endpoints(self):
+        r = self.ok([project(year=2028, period='2028.1.1.~2028.12.31.')],
+                    [person({'사업1': '0.99713'}, absences=['2028.2.29.~2028.2.29'])], 2028)
+        self.assertEqual(amount(r.absence['홍길동'][1]), '0.00287')
+
+    def test_flexible_dates_still_reject_invalid_calendar_and_syntax(self):
+        for value in ('2027.2.29', '2026-4-31', '2026.13.1.', '2026.1.0',
+                      '2026.1-1', '2026-1.1', '2026-1-1.', '2026.1.1..',
+                      '26.1.1', '2026.001.1', '2026/1/1', '2026. 1. 1',
+                      '2026.1.1T00:00:00', '2026.1.1junk', ''):
+            with self.subTest(value=value):
+                self.bad([project(period=f'{value}~2027-12-31')], code='E006')
+                self.bad(people=[person(absences=[f'{value}~2027-12-31'])], code='E006')
+        self.bad([project(period='2027.3.1.~2027-2-28')], code='E006')
+        self.bad(people=[person(absences=['2027.3.1~2027.2.28.'])], code='E006')
+        for value in ('2027.1.1', '2027.1.1~2027.2.1~2027.3.1'):
+            self.bad([project(period=value)], code='E006')
 
     def test_T16_bad_quantities(self):
         for value in ('0.123456', '-1', 'NaN', '.inf', '1e0', True, None, '1_000', '+1', ' 1 '):
