@@ -175,7 +175,8 @@ class MainWindow(QMainWindow):
 
         self.project_editor = ProjectEditor()
         self.people_editor = PeopleEditor(lambda: self.project_editor.projects)
-        self.project_editor.default_year = lambda: self.people_editor.doc.year
+        self.project_editor.managed_year = lambda: self.people_editor.doc.year
+        self.people_editor.year_changed.connect(self.project_editor.refresh_grid)
         self.project_editor.allow_remove = self.allow_remove_project
         self.project_editor.changed.connect(self.projects_changed)
         self.project_editor.alias_renamed.connect(self.alias_renamed)
@@ -452,6 +453,7 @@ class MainWindow(QMainWindow):
             self.people_editor.refresh()
         else:
             self.people_editor.set_doc(document)
+            self.project_editor.reset_years()  # 연도 표를 새 관리 연도 기준 범위로 옮긴다.
         self.edits[kind].setText(str(path))
         self.backed_up.discard(str(Path(path).resolve()))
         self.set_dirty(kind, False)
@@ -472,6 +474,7 @@ class MainWindow(QMainWindow):
             self.auto_projects = None
         else:
             self.people_editor.set_doc(PeopleDoc())
+            self.project_editor.reset_years()
         self.edits[kind].setText('')
         self.set_dirty(kind, False)
         self.mark_stale()
