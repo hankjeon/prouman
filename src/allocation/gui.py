@@ -5,12 +5,13 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
                                QSizePolicy, QSplitter, QStackedWidget, QTableView, QTabWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
+from . import theme
 from .document import DocumentError, PeopleDoc, dump_people, dump_projects, read_people, read_projects
 from .editor import PeopleEditor, ProjectEditor, SelectionDelegate
 from .engine import calculate
@@ -22,7 +23,11 @@ from .tables import (issue_table, people_summary_table, person_detail_table, pro
 
 YAML_FILTER = 'YAML 파일 (*.yaml *.yml);;모든 파일 (*)'
 KINDS = {'projects': '사업', 'people': '사람'}
-SEVERITY_COLORS = {'ERROR': QColor('#c62828'), 'WARNING': QColor('#b26a00')}
+
+
+def severity_colors():
+    """검증 표의 행 색. 호출 때마다 현재 테마에 맞게 구한다."""
+    return {'ERROR': theme.error_text(), 'WARNING': theme.warning_text()}
 # Windows 기본 UI 글꼴(9pt)은 고해상도 모니터에서 작아서 기본값을 키운다.
 DEFAULT_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE = 10, 7, 24
 
@@ -205,8 +210,7 @@ class MainWindow(QMainWindow):
         regenerate = QPushButton('다시 생성')
         regenerate.clicked.connect(self.generate)
         self.stale_bar = QFrame()
-        self.stale_bar.setStyleSheet('QFrame { background-color: #fff4c2; border: 1px solid #e0c060; }'
-                                     'QLabel { border: none; }')
+        self.stale_bar.setStyleSheet(theme.stale_stylesheet())
         stale = QHBoxLayout(self.stale_bar)
         stale.setContentsMargins(8, 4, 8, 4)
         stale.addWidget(self.stale_label, 1)
@@ -255,10 +259,9 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(result_page)
         nav = QFrame()
         nav.setObjectName('nav')
-        nav.setStyleSheet('#nav { background-color: #e8edf3; }'
-                          'QToolButton { border: none; padding: 10px 6px; text-align: left; }'
-                          'QToolButton:checked { background-color: #b7dcff; font-weight: bold; }'
-                          'QToolButton:hover:!checked { background-color: #d5e3f2; }')
+        # 밝은 회색 고정은 다크 테마에서 따로 논다. 팔레트에서 뽑은 값으로 맞춘다.
+        nav.setStyleSheet(theme.nav_stylesheet())
+        self.nav = nav
         nav_layout = QVBoxLayout(nav)
         nav_layout.setContentsMargins(4, 8, 4, 8)
         self.nav_group = QButtonGroup(self)
@@ -377,6 +380,26 @@ class MainWindow(QMainWindow):
             self.stale_label.setText(f'입력이 바뀌었습니다. 아래 결과는 {self.generated_at:%H:%M:%S}에 생성한 '
                                      '입력 기준입니다.')
             self.stale_bar.show()
+
+    def apply_theme_styles(self):
+        """시스템 테마가 바뀌면 메뉴·알림 줄·결과 표 색을 다시 칠한다."""
+        self.nav.setStyleSheet(theme.nav_stylesheet())
+        self.stale_bar.setStyleSheet(theme.stale_stylesheet())
+        self.project_editor.apply_theme()
+        self.people_editor.apply_theme()
+        fresh = severity_colors()
+        for view in (self.issue_view, self.people_summary_view, self.project_summary_view,
+                     self.person_view, self.project_view):
+            model = view.model()
+            if isinstance(model, ResultTableModel) and model.colors:
+                model.colors = fresh
+                model.layoutChanged.emit()
+            view.viewport().update()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.ApplicationPaletteChange:
+            self.apply_theme_styles()
 
     def set_dirty(self, kind, dirty):
         self.dirty[kind] = dirty
@@ -558,7 +581,7 @@ class MainWindow(QMainWindow):
         self.issues = result.issues if result is not None else issues
         self.generated_at, self.generated_from = datetime.now(), labels
         self.result_stack.setCurrentIndex(1)
-        self.issue_view.show_table(*issue_table(self.issues), colors=SEVERITY_COLORS)
+        self.issue_view.show_table(*issue_table(self.issues), colors=severity_colors())
         self.show_page(self.RESULT_PAGE)
         if result is None or result.has_errors:
             self.show_result_header(' · 오류로 결과를 만들지 않았습니다. 입력 화면에서 고친 뒤 다시 생성하세요.')

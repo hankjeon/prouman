@@ -2,24 +2,18 @@
 from datetime import date
 
 from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSplitter, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
+from . import theme
 from .document import (QUANTITY_HINT, AbsenceEntry, PeopleDoc, PersonEntry, ProjectEntry, YearEntry,
                        absence_problems, person_totals, project_problems, quantity_units, to_date, valid_year,
                        year_problems)
 from .models import amount
 
-SELECTION_COLOR = QColor('#b7dcff')
-CURRENT_CELL_COLOR = QColor('#1a73e8')
-CURRENT_ROW_COLOR = QColor('#eef5ff')
-PROBLEM_COLOR = QColor('#ffd6d6')
-COMPUTED_COLOR = QColor('#f0f0f0')
-EXCLUDED_COLOR = QColor('#e6dcff')  # 제외 월이 있는 연도의 배정인력
-OUTSIDE_COLOR = QColor('#e4e4e4')  # 사업 기간 밖 연도, 입력할 수 없는 칸
 TRANSPARENT = QColor(0, 0, 0, 0)
 BASE_ROLE, NOTE_ROLE = Qt.UserRole + 1, Qt.UserRole + 2  # 칸의 기본 배경색과 안내(오류가 없을 때 보임)
 
@@ -29,8 +23,9 @@ class SelectionDelegate(QStyledItemDelegate):
 
     Windows 11 기본 스타일은 선택 셀을 거의 보이지 않는 회색으로, 현재 셀은 흰 바탕으로 그리고
     스타일시트로도 포커스 상태에 따라 일관되게 바뀌지 않는다. 포커스와 관계없이 선택 범위는 같은 색,
-    현재 셀은 테두리로 표시한다. 글자 색(검증 행 색 등)은 그대로 둔다. 표의 row_band가 켜져 있으면
-    현재 행을 옅은 띠로 칠한다. 칸 자체의 배경색은 띠 위에 그려지므로 띠보다 우선한다.
+    현재 셀은 테두리로 표시한다. 선택 배경·글자는 시스템 팔레트(강조색)에서 가져와 다크 테마에서도
+    보인다. 표의 row_band가 켜져 있으면 현재 행을 옅은 띠로 칠한다. 칸 자체의 배경색은 띠 위에
+    그려지므로 띠보다 우선한다.
     """
 
     selected = False
@@ -39,7 +34,7 @@ class SelectionDelegate(QStyledItemDelegate):
         # 칸의 배경색(오류·제외 월 등)보다 선택 색을 우선해야 색이 있는 칸도 선택이 보인다.
         super().initStyleOption(option, index)
         if self.selected:
-            option.backgroundBrush = QBrush(SELECTION_COLOR)
+            option.backgroundBrush = QBrush(theme.selection_color())
 
     def paint(self, painter, option, index):
         state = option.state
@@ -48,14 +43,16 @@ class SelectionDelegate(QStyledItemDelegate):
         view = self.parent()
         self.selected = bool(state & QStyle.StateFlag.State_Selected)
         if self.selected:
-            painter.fillRect(option.rect, SELECTION_COLOR)
+            painter.fillRect(option.rect, theme.selection_color())
+            # 선택 상태 표식을 지웠으므로 글자도 강조 글자색으로 직접 맞춘다.
+            plain.palette.setColor(QPalette.Text, theme.selected_text_color())
         elif getattr(view, 'row_band', False) and index.row() == view.currentRow():
-            painter.fillRect(option.rect, CURRENT_ROW_COLOR)
+            painter.fillRect(option.rect, theme.current_row_color())
         super().paint(painter, plain, index)
         self.selected = False
         if state & QStyle.StateFlag.State_HasFocus:
             painter.save()
-            painter.setPen(CURRENT_CELL_COLOR)
+            painter.setPen(theme.current_cell_color())
             painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
             painter.restore()
 
@@ -125,7 +122,7 @@ class EditTable(QTableWidget):
         item.setFlags(flags | Qt.ItemIsEditable if editable else flags)
         if computed:
             item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            base = base or COMPUTED_COLOR
+            base = base or theme.computed_color()
         item.setData(BASE_ROLE, base)
         item.setData(NOTE_ROLE, note)
         self.setItem(row, column, item)
@@ -137,7 +134,7 @@ class EditTable(QTableWidget):
         if item is None:
             return
         base = item.data(BASE_ROLE)
-        item.setBackground(PROBLEM_COLOR if problem else base if base is not None else TRANSPARENT)
+        item.setBackground(theme.problem_color() if problem else base if base is not None else TRANSPARENT)
         item.setToolTip('\n'.join(text for text in (problem, item.data(NOTE_ROLE) or '') if text))
 
     def keyPressEvent(self, event):
@@ -197,10 +194,17 @@ def titled(title, *parts):
 
 
 def legend(color, text):
+    """범례 칩. 배경은 의미 색, 글자는 칩 밝기에 맞춰 정한다(다크에서도 보여야 한다)."""
     label = QLabel(f'  {text}  ')
-    label.setStyleSheet(f'background-color: {color.name()}; border: 1px solid #c8c8c8; padding: 2px;')
+    label.setStyleSheet(theme.legend_stylesheet(color))
     label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     return label
+
+
+def theme_color(key):
+    """범례 이름 → 현재 테마의 의미 색."""
+    return {'outside': theme.outside_color(), 'excluded': theme.excluded_color(),
+            'problem': theme.problem_color()}[key]
 
 
 class ProjectEditor(QWidget):
@@ -248,7 +252,7 @@ class ProjectEditor(QWidget):
         self.next_button.clicked.connect(lambda: self.shift_years(1))
         self.range_label = QLabel()
         self.notice = QLabel()
-        self.notice.setStyleSheet('color: #c62828;')
+        self.notice.setStyleSheet(theme.error_stylesheet())
         title = QHBoxLayout()
         title.addWidget(QLabel('사업 목록'))
         title.addStretch()
@@ -262,9 +266,12 @@ class ProjectEditor(QWidget):
         self.add_button.clicked.connect(self.add_project)
         self.remove_button.clicked.connect(self.remove_project)
         bottom = button_row(self.add_button, self.remove_button)
-        for color, text in ((OUTSIDE_COLOR, '사업 기간 밖 연도'), (EXCLUDED_COLOR, '제외 월 있음'),
-                            (PROBLEM_COLOR, '입력 확인 필요')):
-            bottom.addWidget(legend(color, text))
+        self.legends = []  # (칩, 의미색 이름, 문구). 시스템 테마가 바뀌면 다시 칠한다.
+        for key, text in (('outside', '사업 기간 밖 연도'), ('excluded', '제외 월 있음'),
+                          ('problem', '입력 확인 필요')):
+            chip = legend(theme_color(key), text)
+            self.legends.append((chip, key, text))
+            bottom.addWidget(chip)
 
         self.split = QSplitter(Qt.Horizontal)
         self.split.addWidget(self.table)
@@ -406,7 +413,11 @@ class ProjectEditor(QWidget):
             font.setBold(year == managed)
             header.setFont(font)
             # 제외월 열이 가리키는 연도와 제외월 열 머리글을 같은 색으로 강조한다.
-            header.setForeground(CURRENT_CELL_COLOR if year == self.excluded_year else QColor('#000000'))
+            # 나머지는 기본 글자색(시스템 테마)을 쓴다. 검은색을 고정하면 다크에서 안 보인다.
+            if year == self.excluded_year:
+                header.setForeground(theme.current_cell_color())
+            else:
+                header.setForeground(QBrush())
             header.setToolTip('관리 연도' if year == managed and column < self.YEARS else '')
         hidden = [0, 0]
         unshown = 0
@@ -426,16 +437,16 @@ class ProjectEditor(QWidget):
                 notes, base = [], None
                 if start and end and not start.year <= year <= end.year:
                     notes.append('사업 기간 밖 연도입니다 (생성하면 경고).')
-                    base = OUTSIDE_COLOR
+                    base = theme.outside_color()
                 if entry and entry.excluded.strip():
                     notes.append(f'제외 월: {entry.excluded}')
-                    base = EXCLUDED_COLOR
+                    base = theme.excluded_color()
                 problem = problems.get((index[id(entry)], 1), '') if entry else ''
                 grid.set_cell(row, column, entry.manpower if entry else '', problem=problem, base=base,
                               note='\n'.join(notes))
             entry = self.entry(project, self.excluded_year)
             if entry is None:
-                grid.set_cell(row, self.YEARS, '', editable=False, base=OUTSIDE_COLOR,
+                grid.set_cell(row, self.YEARS, '', editable=False, base=theme.outside_color(),
                               note=f'먼저 {self.excluded_year} 배정인력을 입력하세요.')
             else:
                 grid.set_cell(row, self.YEARS, entry.excluded, problem=problems.get((index[id(entry)], 2), ''))
@@ -516,6 +527,14 @@ class ProjectEditor(QWidget):
         if event.type() == QEvent.FontChange:
             QTimer.singleShot(0, self.sync_headers)
 
+    def apply_theme(self):
+        """시스템 테마가 바뀌면 스타일·범례·칸 색을 다시 칠한다."""
+        self.notice.setStyleSheet(theme.error_stylesheet())
+        for chip, key, text in self.legends:
+            chip.setStyleSheet(theme.legend_stylesheet(theme_color(key)))
+            chip.setText(f'  {text}  ')
+        self.refresh()
+
 
 def rename_key(mapping, old, new):
     """순서를 유지하며 키 이름을 바꾼 새 dict."""
@@ -567,7 +586,7 @@ class PeopleEditor(QWidget):
         self.add_button.clicked.connect(self.add_person)
         self.remove_button.clicked.connect(self.remove_person)
         self.message = QLabel()
-        self.message.setStyleSheet('color: #c62828;')
+        self.message.setStyleSheet(theme.error_stylesheet())
         self.message.setWordWrap(True)
         left = titled('사람 (이름을 두 번 눌러 바꿉니다)', self.people_list,
                       button_row(self.add_button, self.remove_button), self.message)
@@ -649,6 +668,11 @@ class PeopleEditor(QWidget):
         self.overview.refresh()
         self.changed.emit()
 
+    def apply_theme(self):
+        """시스템 테마가 바뀌면 스타일·목록·칸 색을 다시 칠한다."""
+        self.message.setStyleSheet(theme.error_stylesheet())
+        self.refresh()
+
     # --- 사람 목록 ---
 
     def name_problem(self, person):
@@ -671,7 +695,11 @@ class PeopleEditor(QWidget):
         person, item = self.doc.people[index], self.people_list.item(index)
         problem = self.name_problem(person) or self.total_problem(person) or self.row_problem(person)
         self.people_list.blockSignals(True)
-        item.setForeground(QColor('#c62828') if problem else QColor('#000000'))
+        # 정상은 기본 글자색(시스템 테마)으로 둔다. 검은색을 고정하면 다크에서 안 보인다.
+        if problem:
+            item.setForeground(theme.error_text())
+        else:
+            item.setForeground(QBrush())
         item.setToolTip(problem)
         self.people_list.blockSignals(False)
 
@@ -722,7 +750,7 @@ class PeopleEditor(QWidget):
 
     def mark_year(self):
         problem = '' if valid_year(self.doc.year) else '4자리 연도를 입력하세요 (예: 2026).'
-        self.year_edit.setStyleSheet(f'background-color: {PROBLEM_COLOR.name()};' if problem else '')
+        self.year_edit.setStyleSheet(f'background-color: {theme.problem_color().name()};' if problem else '')
         self.year_edit.setToolTip(problem)
 
     def year_edited(self, text):
@@ -812,7 +840,7 @@ class PeopleEditor(QWidget):
         problem = self.total_problem(person)
         self.totals.setText(f'사업 합계 {texts[0]} · 공백 {texts[1]} · 합계 {total}'
                             + (f'  ⚠ {problem}' if problem else ''))
-        self.totals.setStyleSheet('color: #c62828;' if problem else '')
+        self.totals.setStyleSheet(theme.error_stylesheet() if problem else '')
 
     def allocation_edited(self, item):
         person = self.current()

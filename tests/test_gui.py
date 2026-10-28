@@ -26,9 +26,9 @@ from allocation.document import ProjectEntry
 from allocation.loading import load_inputs
 
 if QApplication is not None:
-    from allocation.editor import EXCLUDED_COLOR, OUTSIDE_COLOR, PROBLEM_COLOR
-    from allocation.gui import (DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, SEVERITY_COLORS, MainWindow,
-                                SelectionDelegate, find_projects_file)
+    from allocation import theme
+    from allocation.gui import (DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, MainWindow, SelectionDelegate,
+                                find_projects_file, severity_colors)
 
 
 @unittest.skipUnless(QApplication, 'PySide6가 설치되지 않아 GUI 테스트를 건너뜁니다.')
@@ -150,7 +150,7 @@ class GuiTests(unittest.TestCase):
         issues = self.texts(w.issue_view)
         self.assertIn(['ERROR', 'E101'], [row[:2] for row in issues])
         model = w.issue_view.model()
-        self.assertEqual(model.data(model.index(0, 0), Qt.ForegroundRole), SEVERITY_COLORS['ERROR'])
+        self.assertEqual(model.data(model.index(0, 0), Qt.ForegroundRole), severity_colors()['ERROR'])
         for view in (w.people_summary_view, w.project_summary_view, w.person_view, w.project_view):
             self.assertEqual(view.model().rowCount(), 0)
         self.assertEqual(w.person_list.count(), 0)
@@ -172,7 +172,7 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(w.excel_button.isEnabled())
         self.assertEqual([row[:2] for row in self.texts(w.issue_view)], [['WARNING', 'W001']])
         model = w.issue_view.model()
-        self.assertEqual(model.data(model.index(0, 0), Qt.ForegroundRole), SEVERITY_COLORS['WARNING'])
+        self.assertEqual(model.data(model.index(0, 0), Qt.ForegroundRole), severity_colors()['WARNING'])
         self.assertEqual(w.people_summary_view.model().rowCount(), 1)
 
     def test_T29_font_size(self):
@@ -514,12 +514,12 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(pe.range_label.text(), '2026 ~ 2030')
 
         # 색: 기간 밖(회색), 제외 월 있음(연보라, 기간 밖보다 우선), 오류(붉은색, 가장 우선).
-        self.assertEqual(grid.item(0, 1).background().color(), EXCLUDED_COLOR)
+        self.assertEqual(grid.item(0, 1).background().color(), theme.excluded_color())
         self.assertIn('제외 월: 4, 5, 6', grid.item(0, 1).toolTip())
-        self.assertEqual(grid.item(0, 3).background().color(), OUTSIDE_COLOR)
+        self.assertEqual(grid.item(0, 3).background().color(), theme.outside_color())
         self.assertIn('사업 기간 밖', grid.item(0, 3).toolTip())
         grid.item(0, 1).setText('1.5.5')
-        self.assertEqual(grid.item(0, 1).background().color(), PROBLEM_COLOR)
+        self.assertEqual(grid.item(0, 1).background().color(), theme.problem_color())
         self.assertEqual(table.item(0, pe.TOTAL).text(), '?')
         self.assertIn('2027', table.item(0, pe.TOTAL).toolTip())
         grid.item(0, 1).setText('1.5')
@@ -532,11 +532,11 @@ class GuiTests(unittest.TestCase):
         self.assertFalse(grid.item(1, 5).flags() & Qt.ItemIsEditable)
         self.assertIn('먼저 2026 배정인력', grid.item(1, 5).toolTip())
         grid.item(0, 5).setText('3,4')
-        self.assertEqual(grid.item(0, 0).background().color(), EXCLUDED_COLOR)
+        self.assertEqual(grid.item(0, 0).background().color(), theme.excluded_color())
         grid.setCurrentCell(0, 5)  # 제외월 열로 가도 기준 연도는 유지한다.
         self.assertEqual(pe.excluded_year, 2026)
         grid.item(0, 5).setText('')
-        self.assertNotEqual(grid.item(0, 0).background().color(), EXCLUDED_COLOR)
+        self.assertNotEqual(grid.item(0, 0).background().color(), theme.excluded_color())
 
         # 배정 칸: 입력하면 항목 생성, 비우면 삭제, 제외 월이 남아 있으면 빈 배정으로 남아 오류 표시.
         grid.item(1, 2).setText('2')
@@ -548,12 +548,12 @@ class GuiTests(unittest.TestCase):
         grid.item(0, 1).setText('')
         self.assertEqual([(e.year, e.manpower, e.excluded) for e in pe.projects[0].years if e.year == '2027'],
                          [('2027', '', '4, 5, 6')])
-        self.assertEqual(grid.item(0, 1).background().color(), PROBLEM_COLOR)
+        self.assertEqual(grid.item(0, 1).background().color(), theme.problem_color())
         grid.item(0, 1).setText('1.5')
 
         # 사업 기간을 바꾸면 기간 밖 표시가 바뀐다.
         table.item(0, pe.END).setText('2029-12-31')
-        self.assertNotEqual(grid.item(0, 3).background().color(), OUTSIDE_COLOR)
+        self.assertNotEqual(grid.item(0, 3).background().color(), theme.outside_color())
 
         # 좌우 현재 행과 세로 스크롤이 맞물린다.
         table.setCurrentCell(1, 0)
@@ -675,6 +675,63 @@ class GuiTests(unittest.TestCase):
         empty = self.path / 'a' / 'b' / 'people.yaml'
         empty.parent.mkdir(parents=True)
         self.assertIsNone(find_projects_file(empty))
+
+
+@unittest.skipUnless(QApplication, 'PySide6가 설치되지 않아 GUI 테스트를 건너뜁니다.')
+class ThemeTests(unittest.TestCase):
+    """시스템 테마 대응 회귀 테스트. 다크에서도 메뉴·선택·칸이 보여야 한다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def themed(self, dark, func, *args):
+        original = theme.is_dark
+        theme.is_dark = lambda: dark
+        try:
+            return func(*args)
+        finally:
+            theme.is_dark = original
+
+    def test_T29_theme_pairs_differ(self):
+        # 라이트/다크 짝이 다르면 테마에 따라 다른 색이 나온다.
+        for func in (theme.current_row_color, theme.current_cell_color, theme.problem_color,
+                     theme.computed_color, theme.excluded_color, theme.outside_color,
+                     theme.error_text, theme.warning_text):
+            with self.subTest(func=func.__name__):
+                self.assertNotEqual(self.themed(False, func).name(), self.themed(True, func).name())
+
+    def test_T29_selection_follows_system_highlight(self):
+        # 선택 배경은 시스템 강조색이라 어떤 테마에서도 어울리고,
+        # 글자는 강조 글자색이라 배경과 대비된다.
+        from PySide6.QtGui import QPalette
+        palette = self.app.palette()
+        self.assertEqual(theme.selection_color().name(), palette.color(QPalette.Highlight).name())
+        self.assertEqual(theme.selected_text_color().name(), palette.color(QPalette.HighlightedText).name())
+        self.assertNotEqual(theme.selection_color().name(), theme.selected_text_color().name())
+
+    def test_T29_nav_stylesheet_uses_palette(self):
+        # 좌측 메뉴: 배경·글자·선택이 시스템 팔레트에서 나온다.
+        # 예전처럼 밝은 배경에 흰 글자(안 보임)가 되지 않는다.
+        from PySide6.QtGui import QPalette
+        sheet = theme.nav_stylesheet()
+        palette = self.app.palette()
+        for role in (QPalette.Window, QPalette.WindowText, QPalette.Highlight, QPalette.HighlightedText):
+            self.assertIn(palette.color(role).name(), sheet)
+        checked_bg = palette.color(QPalette.Highlight).name()
+        checked_text = palette.color(QPalette.HighlightedText).name()
+        self.assertIn(f'QToolButton:checked {{ background-color: {checked_bg}; color: {checked_text};', sheet)
+
+    def test_T29_legend_text_contrasts(self):
+        # 범례 칩은 글자색을 함께 지정한다. 밝은 칩에 검은 글자, 어두운 칩에 흰 글자.
+        from PySide6.QtGui import QColor
+        self.assertIn('color: #000000', theme.legend_stylesheet(QColor('#e4e4e4')))
+        self.assertIn('color: #ffffff', theme.legend_stylesheet(QColor('#333333')))
+
+    def test_T29_dark_error_text_is_light(self):
+        # 다크에서 오류 빨강(#c62828)은 안 보이므로 밝은 빨강을 쓴다.
+        dark_error = self.themed(True, theme.error_text)
+        self.assertGreater(dark_error.lightness(), 100)
 
 
 if __name__ == '__main__':
