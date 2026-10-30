@@ -313,6 +313,35 @@ class AcceptanceTests(unittest.TestCase):
             self.assertIn('E008', p.stdout)
             self.assertNotIn('개인별 연간 요약', p.stdout)
 
+    def test_project_detail_shows_participants_and_monthly_totals(self):
+        projects = [project(excluded=[4, 5, 6]), project('사업2'), project('미할당사업', limit='0')]
+        people = [person({'사업1': '0.60000', '사업2': '0.40000'}, name='가'),
+                  person({'사업1': '0.30000', '사업2': '0.70000'}, name='나'),
+                  person({'사업2': '1.00000', '사업1': '0'}, name='다')]
+        self.write(projects, people)
+        result, _ = self.run_files((self.path / 'projects.yaml', self.path / 'people.yaml'))
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertFalse(result.has_errors, result.issues)
+        for args in (('--project', '사업1'), ('--all-projects',), ('--all',)):
+            with self.subTest(args=args):
+                output = self.cli(*args)
+                self.assertEqual(output.returncode, 0, output.stdout + output.stderr)
+                section = output.stdout.split('사업 상세: 사업1 (사업1)', 1)[1].split('-' * 72, 1)[0]
+                rows = [line.split(' | ') for line in section.splitlines() if ' | ' in line]
+                self.assertEqual([r[0] for r in rows], ['사업/구분', '가', '나', '할당'])
+                for row, name in zip(rows[1:3], ('가', '나')):
+                    values = result.allocations[name]['사업1']
+                    self.assertEqual(row[1:], [amount(v) for v in values] + [amount(sum(values))])
+                totals = project_summary(result, '사업1')[3]
+                self.assertEqual(rows[-1][1:], [amount(v) for v in totals] + [amount(sum(totals))])
+                self.assertEqual(rows[-1][4:7], ['0.00000'] * 3)
+        empty = self.cli('--project', '미할당사업')
+        self.assertEqual(empty.returncode, 0, empty.stdout + empty.stderr)
+        rows = [line.split(' | ') for line in empty.stdout.splitlines() if ' | ' in line]
+        self.assertEqual([r[0] for r in rows], ['사업/구분', '할당'])
+        self.assertEqual(rows[-1][1:], ['0.00000'] * 13)
+
     def test_all_displays_every_person_and_project_with_section_breaks(self):
         self.write([project(), project('사업2'), project('미할당사업', limit='0')],
                    [person(), person({'사업2': '1'}, name='김철수')])

@@ -75,5 +75,9 @@ def render_result(result, person=None, project=None, show_all=False, *, all_peop
         lines.extend(['', '-' * 72, f'사업 상세: {alias} ({item.name})',
                       f'연간 배정: {amount(limit)} / 할당: {amount(total)} / 잔여: {amount(limit - total)}'
                       + (' (배정 미등록)' if missing else ''), header])
+        for name in sorted(result.allocations):
+            values = result.allocations[name].get(alias)
+            if values and sum(values) > 0:
+                lines.append(table_row(name, values))
         lines.append(table_row('할당', totals))
     return '\n'.join(lines)
