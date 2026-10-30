@@ -175,6 +175,13 @@ class AcceptanceTests(unittest.TestCase):
         self.bad([p], code='E003')
         self.bad(people=[person(), person()], code='E004')
         self.bad(people=[person({'없음': '1'})], code='E007')
+        # 사업 파일 오류가 사람 파일에 미등록 약칭 오류를 연달아 만들지 않는다. 다른 사람 오류는 그대로 보인다.
+        p = project()
+        p['period'] = '2027-13-01~2027-12-31'
+        codes = [i.code for i in self.bad([p], people=[person(), person({'사업1': '1.000001'}, name='김철수')])]
+        self.assertIn('E006', codes)
+        self.assertIn('E005', codes)
+        self.assertNotIn('E007', codes)
 
     def test_T15_duplicate_yaml_keys(self):
         paths = self.write([project()], [person()])

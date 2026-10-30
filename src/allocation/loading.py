@@ -196,7 +196,7 @@ class Validator:
                 projects[alias] = Project(name, alias, *period, budgets)
         return dict(sorted(projects.items()))
 
-    def people(self, value, path, projects):
+    def people(self, value, path, projects, check_aliases=True):
         root = self.mapping(value, path, {'year', 'people'})
         year = self.integer(root.get('year', MISSING), path + '.year', 1000, 9999)
         people = {}
@@ -227,7 +227,7 @@ class Validator:
                         self.error('E004', loc, alias, '공백 제거 후 중복 없는 사업약칭')
                     elif quantity is not None:
                         targets[alias] = quantity
-                    if alias not in projects:
+                    if check_aliases and alias not in projects:
                         self.error('E007', loc, alias, '사업 파일에 등록된 사업약칭')
             if name in people:
                 self.error('E004', where + '.name', name, '고유한 사람 이름')
@@ -241,7 +241,10 @@ def load_inputs(project_file='projects.yaml', people_file=None, texts=None):
     texts = texts or {}
     validator = Validator()
     projects = validator.projects(validator.read(project_file, texts.get('projects')), str(project_file))
-    year, people = validator.people(validator.read(people_file, texts.get('people')), str(people_file), projects)
+    # 사업 파일에 오류가 있으면 사업 목록이 불완전하므로 미등록 약칭(E007)만 생략하고 나머지 사람 오류는 모두 보인다.
+    project_ok = not any(issue.severity == 'ERROR' for issue in validator.issues)
+    year, people = validator.people(validator.read(people_file, texts.get('people')), str(people_file), projects,
+                                    check_aliases=project_ok)
     inputs = None
     if not any(issue.severity == 'ERROR' for issue in validator.issues):
         inputs = Inputs(year, projects, people, str(project_file), str(people_file))
