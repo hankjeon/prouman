@@ -17,8 +17,8 @@ from .editor import PeopleEditor, ProjectEditor, SelectionDelegate
 from .engine import calculate
 from .loading import decode_text, load_inputs
 from .models import amount
-from .rendering import issue_counts
-from .tables import (issue_table, people_summary_table, person_detail_table, project_detail_table,
+from .rendering import issue_counts, project_summary
+from .tables import (issue_table, people_summary_table, person_detail_table, project_people_table,
                      project_summary_table)
 
 YAML_FILTER = 'YAML 파일 (*.yaml *.yml);;모든 파일 (*)'
@@ -237,10 +237,22 @@ class MainWindow(QMainWindow):
         people.addWidget(self.person_list)
         people.addWidget(self.person_view)
         people.setSizes([180, 1000])
-        self.project_view = CopyTableView()
+        self.project_list = QListWidget()
+        self.project_list.currentTextChanged.connect(self.show_project_people)
+        self.project_people_view = CopyTableView()
+        self.project_detail_label = QLabel()
+        participant_panel = QWidget()
+        participant_layout = QVBoxLayout(participant_panel)
+        participant_layout.setContentsMargins(0, 0, 0, 0)
+        participant_layout.addWidget(self.project_detail_label)
+        participant_layout.addWidget(self.project_people_view)
+        project_details = QSplitter(Qt.Horizontal)
+        project_details.addWidget(self.project_list)
+        project_details.addWidget(participant_panel)
+        project_details.setSizes([180, 1000])
         self.result_tabs = QTabWidget()
         for widget, title in ((self.issue_view, '검증'), (summary, '요약'), (people, '개인상세'),
-                              (self.project_view, '사업상세')):
+                              (project_details, '사업상세')):
             self.result_tabs.addTab(widget, title)
         placeholder = QLabel('아직 생성하지 않았습니다.\n입력 화면에서 [생성 ▶]을 누르세요.')
         placeholder.setAlignment(Qt.AlignCenter)
@@ -389,7 +401,7 @@ class MainWindow(QMainWindow):
         self.people_editor.apply_theme()
         fresh = severity_colors()
         for view in (self.issue_view, self.people_summary_view, self.project_summary_view,
-                     self.person_view, self.project_view):
+                     self.person_view, self.project_people_view):
             model = view.model()
             if isinstance(model, ResultTableModel) and model.colors:
                 model.colors = fresh
@@ -553,9 +565,11 @@ class MainWindow(QMainWindow):
     # --- 계산 결과 ---
 
     def clear_results(self):
-        for view in (self.people_summary_view, self.project_summary_view, self.person_view, self.project_view):
+        for view in (self.people_summary_view, self.project_summary_view, self.person_view, self.project_people_view):
             view.show_table([], [])
+        self.project_detail_label.clear()
         self.person_list.clear()
+        self.project_list.clear()
 
     def generate(self):
         """입력 화면의 현재 내용(저장 전이어도)을 파일과 같은 규칙으로 검증·계산하고 결과 화면으로 간다."""
@@ -592,11 +606,24 @@ class MainWindow(QMainWindow):
         self.show_result_header()
         self.people_summary_view.show_table(*people_summary_table(result))
         self.project_summary_view.show_table(*project_summary_table(result))
-        self.project_view.show_table(*project_detail_table(result))
+        self.project_list.addItems(list(result.inputs.projects))
+        self.project_list.setCurrentRow(0)
         self.person_list.addItems(list(result.inputs.people))
         self.person_list.setCurrentRow(0)
         self.excel_button.setEnabled(True)
         self.result_tabs.setCurrentIndex(self.SUMMARY_TAB)
+
+    def show_project_people(self, alias):
+        if self.result is not None and alias in self.result.inputs.projects:
+            item, limit, missing, totals = project_summary(self.result, alias)
+            total = sum(totals)
+            self.project_detail_label.setText(
+                f'{alias} ({item.name}) · 배정 {amount(limit)} / 할당 {amount(total)} / 잔여 {amount(limit - total)}'
+                + (' (배정 미등록)' if missing else ''))
+            self.project_people_view.show_table(*project_people_table(self.result, alias), bold_label='합계')
+        else:
+            self.project_detail_label.clear()
+            self.project_people_view.show_table([], [])
 
     def show_person(self, name):
         if self.result is not None and name in self.result.inputs.people:

@@ -96,9 +96,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.texts(w.project_summary_view),
                          [['사업1', '사업1', '10.00000', '0.60000', '9.40000', ''],
                           ['사업2', '사업2', '10.00000', '1.40000', '8.60000', '']])
-        projects = self.texts(w.project_view)
-        self.assertEqual([len(row) for row in projects], [18, 18])
-        self.assertEqual(projects[0][6:9], ['0.05000', '0.05000', '0.05000'])
+        self.assertIn('배정 10.00000 / 할당 0.60000 / 잔여 9.40000', w.project_detail_label.text())
 
         # 사람을 고르면 사업·공백·합계 표가 나오고 합계 행은 굵게 표시한다.
         self.assertEqual([w.person_list.item(i).text() for i in range(w.person_list.count())], ['김철수', '홍길동'])
@@ -139,6 +137,41 @@ class GuiTests(unittest.TestCase):
         self.assertEqual([p.alias for p in again.project_editor.projects], ['사업1', '사업2'])
         self.assertEqual(len(again.people_editor.doc.people), 2)
 
+    def test_project_participants_selection_and_error_clear(self):
+        w = self.generated([project(excluded=[4, 5, 6]), project('사업2'), project('빈사업', limit='0')],
+                           [person({'사업1': '0.60000', '사업2': '0.40000'}),
+                            person({'사업1': '0.30000', '사업2': '0.70000'}, name='김철수'),
+                            person({'사업1': '0', '사업2': '1'}, name='이영희')])
+        from PySide6.QtWidgets import QSplitter
+        details = w.result_tabs.widget(3)
+        self.assertIsInstance(details, QSplitter)
+        self.assertEqual(details.orientation(), Qt.Horizontal)
+        self.assertIs(details.widget(0), w.project_list)
+        self.assertEqual(details.widget(1).layout().itemAt(1).widget(), w.project_people_view)
+        aliases = [w.project_list.item(i).text() for i in range(w.project_list.count())]
+        w.project_list.setCurrentRow(aliases.index('사업1'))
+        rows = self.texts(w.project_people_view)
+        self.assertEqual([row[0] for row in rows], ['김철수', '홍길동', '합계'])
+        for row, name in zip(rows[:2], ('김철수', '홍길동')):
+            from allocation.models import amount
+            values = w.result.allocations[name]['사업1']
+            self.assertEqual(row[1:], [amount(v) for v in values] + [amount(sum(values))])
+        self.assertEqual(rows[-1][4:7], ['0.00000'] * 3)
+        self.assertEqual(rows[-1][-1], '0.90000')
+        self.assertTrue(w.project_people_view.model().data(w.project_people_view.model().index(2, 1), Qt.FontRole).bold())
+        w.project_people_view.selectionModel().select(w.project_people_view.model().index(0, 1),
+                                                      QItemSelectionModel.SelectionFlag.Select)
+        self.assertEqual(w.project_people_view.copy_selection(), rows[0][1])
+        w.project_list.setCurrentRow(aliases.index('사업2'))
+        self.assertEqual([row[0] for row in self.texts(w.project_people_view)], ['김철수', '이영희', '홍길동', '합계'])
+        w.project_list.setCurrentRow(aliases.index('빈사업'))
+        self.assertEqual(self.texts(w.project_people_view), [['합계'] + ['0.00000'] * 13])
+        w.people_editor.doc.people[0].allocations = {}  # 오류 생성 시 이전 상세를 지운다.
+        w.generate()
+        self.assertIsNone(w.result)
+        self.assertEqual(w.project_list.count(), 0)
+        self.assertEqual(self.texts(w.project_people_view), [])
+
     def test_T29_errors_clear_results(self):
         w = self.generated([project()], [person()])
         self.assertTrue(w.excel_button.isEnabled())
@@ -153,7 +186,7 @@ class GuiTests(unittest.TestCase):
         self.assertIn(['ERROR', 'E101'], [row[:2] for row in issues])
         model = w.issue_view.model()
         self.assertEqual(model.data(model.index(0, 0), Qt.ForegroundRole), severity_colors()['ERROR'])
-        for view in (w.people_summary_view, w.project_summary_view, w.person_view, w.project_view):
+        for view in (w.people_summary_view, w.project_summary_view, w.person_view, w.project_people_view):
             self.assertEqual(view.model().rowCount(), 0)
         self.assertEqual(w.person_list.count(), 0)
 

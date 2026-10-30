@@ -1,5 +1,5 @@
 """엑셀과 GUI가 함께 쓰는 결과 표. 셀 값은 글자(str) 또는 0.00001 단위 수량(int)이다."""
-from .rendering import issue_sort_key, person_summary, person_table, project_summary
+from .rendering import issue_sort_key, person_summary, person_table, project_people, project_summary
 
 MONTHS = [f'{m}월' for m in range(1, 13)]
 PROJECT_COLUMNS = ['사업약칭', '사업명', '배정', '할당', '잔여', '비고']
@@ -27,6 +27,13 @@ def project_summary_table(result):
 def person_detail_table(result, name):
     return (['사업/구분', *MONTHS, '연간'],
             [[label, *values, sum(values)] for label, values in person_table(result, name)])
+
+
+def project_people_table(result, alias):
+    rows = [[name, *values, sum(values)] for name, values in project_people(result, alias)]
+    totals = project_summary(result, alias)[3]
+    rows.append(['합계', *totals, sum(totals)])
+    return ['이름/구분', *MONTHS, '연간'], rows
 
 
 def project_detail_table(result):

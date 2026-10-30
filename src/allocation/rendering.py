@@ -43,6 +43,11 @@ def project_summary(result, alias):
     return item, budget.limit if budget else 0, budget is None, totals
 
 
+def project_people(result, alias):
+    return [(name, result.allocations[name][alias]) for name in sorted(result.allocations)
+            if alias in result.allocations[name] and sum(result.allocations[name][alias]) > 0]
+
+
 def table_row(label, values):
     return ' | '.join([label, *(amount(value) for value in values + [sum(values)])])
 
@@ -75,9 +80,6 @@ def render_result(result, person=None, project=None, show_all=False, *, all_peop
         lines.extend(['', '-' * 72, f'사업 상세: {alias} ({item.name})',
                       f'연간 배정: {amount(limit)} / 할당: {amount(total)} / 잔여: {amount(limit - total)}'
                       + (' (배정 미등록)' if missing else ''), header])
-        for name in sorted(result.allocations):
-            values = result.allocations[name].get(alias)
-            if values and sum(values) > 0:
-                lines.append(table_row(name, values))
+        lines.extend(table_row(name, values) for name, values in project_people(result, alias))
         lines.append(table_row('할당', totals))
     return '\n'.join(lines)
