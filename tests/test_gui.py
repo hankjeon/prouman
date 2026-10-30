@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import sys
 import tempfile
@@ -9,12 +10,13 @@ from openpyxl import load_workbook
 
 # 창을 띄우지 않고 검증한다. 사용자가 지정한 플랫폼이 있으면 그대로 쓴다.
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-try:
+# PySide6가 없을 때만 건너뛴다. 설치됐는데 불러오지 못하면(예: libEGL 누락) 성공처럼 보이지 않게 오류를 낸다.
+if importlib.util.find_spec('PySide6') is None:
+    QApplication = None
+else:
     from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import QApplication, QComboBox
-except ImportError:
-    QApplication = None
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -155,12 +157,12 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(view.model().rowCount(), 0)
         self.assertEqual(w.person_list.count(), 0)
 
-        # 사업 입력이 비면 YAML 검증 오류(E003)와 미등록 약칭(E007)이 나온다.
+        # 사업 입력이 비면 YAML 검증 오류(E003)만 나오고, 불완전한 사업 목록으로 미등록 약칭(E007)을 덧붙이지 않는다.
         w.new_document('projects')
         w.generate()
         codes = [row[1] for row in self.texts(w.issue_view)]
         self.assertIn('E003', codes)
-        self.assertIn('E007', codes)
+        self.assertNotIn('E007', codes)
         self.assertFalse(w.excel_button.isEnabled())
 
         w.choose_projects(str(self.path / '없는 파일.yaml'))

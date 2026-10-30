@@ -2,7 +2,8 @@ from .models import amount
 
 
 def issue_sort_key(issue):
-    return issue.severity, issue.location, issue.code, issue.current
+    # 안정 정렬로 ERROR를 앞에 두고 같은 심각도 안에서는 검증 순서(사업 파일 → 사람 파일 → 계산, 파일 안은 항목 순서)를 유지한다.
+    return issue.severity != 'ERROR'
 
 
 def issue_counts(issues):
