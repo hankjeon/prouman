@@ -23,7 +23,7 @@ from allocation.engine import BASE, calculate, validate_result
 from allocation.flow import transport
 from allocation.loading import load_inputs
 from allocation.models import amount
-from allocation.rendering import person_summary, person_table, project_summary, render_result
+from allocation.rendering import issue_sort_key, person_summary, person_table, project_summary, render_result
 
 
 def project(alias='사업1', year=2027, excluded=(), limit='10.00000', period=None):
@@ -147,6 +147,20 @@ class AcceptanceTests(unittest.TestCase):
     def test_T11_no_project_for_excluded_months(self):
         self.bad([project(excluded=[4, 5, 6])], code='E201')
 
+    def test_T11_no_allowed_months_named_per_project(self):
+        # 허용 월이 없는 양수 목표는 연간 합계 오류(E101)와 별개로 사업 단위로 알린다.
+        issues = self.bad([project(excluded=list(range(1, 13))), project('사업2')],
+                          [person({'사업1': '0.20000', '사업2': '0.70000'})], code='E201')
+        self.assertIn('E101', [i.code for i in issues])
+        message = next(i.current for i in issues if i.code == 'E201')
+        self.assertIn('사업1 목표 0.20000: 허용 월 없음', message)
+        self.assertNotIn('사업2', message)
+        # 사업 기간 안이어도 전 기간 공백이면 그 사람에게는 허용 월이 없다.
+        issues = self.bad([project(period='2027-01-01~2027-03-31'), project('사업2')],
+                          [person({'사업1': '0.25000', '사업2': '0.00000'}, absences=['2027-01-01~2027-03-31'])],
+                          code='E201')
+        self.assertIn('허용 월 없음', next(i.current for i in issues if i.code == 'E201'))
+
     def test_T12_joint_capacity_conflict(self):
         issues = self.bad([project(excluded=[4, 5, 6]), project('사업2', excluded=[4, 5, 6])],
                          [person({'사업1': '0.50000', '사업2': '0.50000'})], code='E201')
@@ -182,6 +196,20 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIn('E006', codes)
         self.assertIn('E005', codes)
         self.assertNotIn('E007', codes)
+
+    def test_T15_issue_order_follows_validation(self):
+        # ERROR가 먼저이고, 같은 심각도 안에서는 사업 파일 → 사람 파일, 파일 안은 항목 번호 순서다.
+        p = project(excluded=[4, 4])
+        p['period'] = '2027-13-01~2027-12-31'
+        people = [person({'사업1': '1.000001' if i in (2, 10) else '1'}, name=f'사람{i}') for i in range(11)]
+        issues = self.bad([project('사업0', excluded=[5, 5]), p], people)
+        ordered = sorted(issues, key=issue_sort_key)
+        self.assertEqual([(i.code, Path(i.location.split('.yaml')[0]).name) for i in ordered],
+                         [('E006', 'projects'), ('E005', 'people'), ('E005', 'people'),
+                          ('W001', 'projects'), ('W001', 'projects')])
+        self.assertIn('people[2]', ordered[1].location)
+        self.assertIn('people[10]', ordered[2].location)
+        self.assertIn('projects[0]', ordered[3].location)
 
     def test_T15_duplicate_yaml_keys(self):
         paths = self.write([project()], [person()])

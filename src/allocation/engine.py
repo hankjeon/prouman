@@ -79,6 +79,14 @@ def calculate(inputs, issues=()):
         capacities = [base - absence for base, absence in zip(BASE, result.absence[name])]
         allowed = {alias: allowed_months(inputs.projects[alias], year) &
                    {m for m, capacity in enumerate(capacities) if capacity > 0} for alias in person.targets}
+        # 허용 월이 전혀 없는 양수 목표는 연간 합계와 무관한 원인이므로 사업 단위로 따로 알린다.
+        empty = [alias for alias, target in person.targets.items() if target and not allowed[alias]]
+        if empty:
+            result.issues.append(Issue('ERROR', 'E201', f'{inputs.people_file}: {name} / {year}',
+                ', '.join(f'{alias} 목표 {amount(person.targets[alias])}: 허용 월 없음' for alias in empty),
+                '양수 목표 사업마다 허용 월(수행 기간 안, 제외 월 아님, 개인 가용량 > 0) 1개 이상',
+                '해당 사업의 수행 기간·제외 월과 그 사람의 공백을 확인하세요.'))
+            continue  # 원인을 고친 뒤 나머지 사업의 배분 가능성을 다시 판정한다.
         if sum(person.targets.values()) != sum(capacities):
             continue  # 합계가 잘못된 입력의 배분 가능성 진단은 의미가 없다.
         values, shortage, cut_projects, cut_months = transport(person.targets, allowed, capacities)
