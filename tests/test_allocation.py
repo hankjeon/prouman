@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 from allocation.cli import main
 from allocation.engine import BASE, calculate, validate_result
+from allocation.excel import write_workbook
 from allocation.flow import transport
 from allocation.loading import load_inputs
 from allocation.models import amount
@@ -611,6 +612,24 @@ class AcceptanceTests(unittest.TestCase):
         p = self.cli('--excel', 'folder.xlsx')
         self.assertEqual(p.returncode, 1)
         self.assertIn('엑셀 저장 실패: folder.xlsx', p.stdout)
+        self.assertEqual(sorted(f.name for f in self.path.glob('.~*')), [])
+
+        # 쓰는 도중 실패해도 기존 파일은 그대로이고 임시 파일도 남지 않는다.
+        before = (self.path / 'out.xlsx').read_bytes()
+
+        def broken_save(book, target):
+            Path(target).write_bytes(b'partial')
+            raise OSError('디스크 가득 참')
+
+        with patch('openpyxl.Workbook.save', broken_save), self.assertRaises(OSError):
+            write_workbook(result, self.path / 'out.xlsx')
+        self.assertEqual((self.path / 'out.xlsx').read_bytes(), before)
+        self.assertEqual(sorted(f.name for f in self.path.glob('.~*')), [])
+        write_workbook(result, self.path / 'new.xlsx')
+        if os.name == 'posix':
+            mask = os.umask(0)
+            os.umask(mask)
+            self.assertEqual((self.path / 'new.xlsx').stat().st_mode & 0o777, 0o666 & ~mask)
 
         # ERROR가 있으면 파일을 만들지 않는다.
         self.write([project()], [person({'사업1': '0.90000'})])

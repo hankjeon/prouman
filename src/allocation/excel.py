@@ -1,5 +1,8 @@
 """계산 결과를 주제별 4개 시트의 .xlsx 파일로 저장한다. 조회 옵션과 관계없이 전체 결과를 담는다."""
+import os
+import tempfile
 from decimal import Decimal
+from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -78,4 +81,21 @@ def write_workbook(result, path):
     projects.sheet.freeze_panes = 'C2'
     projects.widths(16, 32, 10, 10, 10, 12, *[10] * 12)
 
-    book.save(path)
+    save_replacing(book, path)
+
+
+def save_replacing(book, path):
+    """같은 폴더의 임시 파일에 다 쓴 뒤 바꿔 넣는다. 저장에 실패하면 기존 파일을 그대로 두고 임시 파일을 지운다."""
+    target = Path(path)
+    handle, temp = tempfile.mkstemp(prefix='.~', suffix='.xlsx', dir=target.parent)
+    os.close(handle)
+    try:
+        # mkstemp는 소유자만 읽을 수 있게 만든다. 직접 만든 파일처럼 umask를 따른다.
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(temp, 0o666 & ~mask)
+        book.save(temp)
+        os.replace(temp, target)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
