@@ -154,6 +154,17 @@ def read_people(text):
     return doc, reader.dropped
 
 
+def detect_kind(text):
+    """YAML 최상위 키로 사업/사람 문서를 구분한다. 둘 다 아니면 None. 문법 오류는 DocumentError."""
+    root = _Reader().parse(text)
+    if type(root) is not dict:
+        return None
+    has_projects, has_people = 'projects' in root, 'people' in root
+    if has_projects == has_people:
+        return None
+    return 'projects' if has_projects else 'people'
+
+
 # --- YAML 쓰기 -------------------------------------------------------------------------------
 
 def _text(value):

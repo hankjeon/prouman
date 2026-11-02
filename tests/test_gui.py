@@ -45,16 +45,18 @@ class GuiTests(unittest.TestCase):
         self.path = Path(directory.name)
         self.settings = QSettings(str(self.path / 'settings.ini'), QSettings.IniFormat)
         self.warnings = []
-        self.save_answers = []  # 저장하지 않은 변경 질문에 줄 답. 비면 'discard'
+        self.export_answers = []  # 내보내지 않은 변경 질문에 줄 답. 비면 'discard'
         self.confirm_answer = True
-        self.save_paths = []  # 저장 위치 대화상자에 줄 경로
+        self.export_folders = []  # 내보내기 폴더 대화상자에 줄 경로
+        self.year_answers = []  # 연도 추가 대화상자에 줄 연도
 
     def window(self):
         window = MainWindow(self.settings)
         window.warn = lambda title, text: self.warnings.append((title, text))
-        window.ask_save = lambda kind: self.save_answers.pop(0) if self.save_answers else 'discard'
+        window.ask_export = lambda desc: self.export_answers.pop(0) if self.export_answers else 'discard'
         window.confirm = lambda title, text: self.confirm_answer
-        window.ask_save_path = lambda kind: self.save_paths.pop(0) if self.save_paths else ''
+        window.ask_export_folder = lambda: self.export_folders.pop(0) if self.export_folders else ''
+        window.ask_year = lambda: self.year_answers.pop(0) if self.year_answers else ''
         self.addCleanup(window.deleteLater)
         return window
 
@@ -66,11 +68,11 @@ class GuiTests(unittest.TestCase):
                      encoding='utf-8')
         return p, h
 
-    def generated(self, projects, people):
-        p, h = self.write(projects, people)
+    def generated(self, projects, people, year=2027):
+        p, h = self.write(projects, people, year)
         window = self.window()
-        window.choose_projects(str(p))
-        window.choose_people(str(h))
+        errors, _ = window.import_files([str(p), str(h)])
+        self.assertEqual(errors, [])
         window.generate()
         return window
 
@@ -132,8 +134,9 @@ class GuiTests(unittest.TestCase):
 
         # 연 파일 경로를 기억해 다음 창에서 다시 연다.
         again = self.window()
-        self.assertEqual(again.projects_edit.text(), str(self.path / 'projects.yaml'))
-        self.assertEqual(again.people_edit.text(), str(self.path / 'people' / 'people.yaml'))
+        self.assertEqual(again.loaded_files,
+                         [str(self.path / 'projects.yaml'), str(self.path / 'people' / 'people.yaml')])
+        self.assertEqual(again.current_year, '2027')
         self.assertEqual([p.alias for p in again.project_editor.projects], ['사업1', '사업2'])
         self.assertEqual(len(again.people_editor.doc.people), 2)
 
@@ -175,8 +178,8 @@ class GuiTests(unittest.TestCase):
     def test_T29_errors_clear_results(self):
         w = self.generated([project()], [person()])
         self.assertTrue(w.excel_button.isEnabled())
-        _, h = self.write([project()], [person({'사업1': '0.90000'})])
-        w.choose_people(str(h))
+        w.people_editor.doc.people[0].allocations = {'사업1': '0.90000'}
+        w.people_editor.refresh()
         w.generate()
         self.assertEqual((w.pages.currentIndex(), w.result_tabs.currentIndex()), (w.RESULT_PAGE, w.ISSUES_TAB))
         self.assertFalse(w.excel_button.isEnabled())
@@ -191,15 +194,15 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.person_list.count(), 0)
 
         # 사업 입력이 비면 YAML 검증 오류(E003)만 나오고, 불완전한 사업 목록으로 미등록 약칭(E007)을 덧붙이지 않는다.
-        w.new_document('projects')
+        w.project_editor.set_projects([])
         w.generate()
         codes = [row[1] for row in self.texts(w.issue_view)]
         self.assertIn('E003', codes)
         self.assertNotIn('E007', codes)
         self.assertFalse(w.excel_button.isEnabled())
 
-        w.choose_projects(str(self.path / '없는 파일.yaml'))
-        self.assertEqual(self.warnings[-1][0], '사업 파일 열기 실패')
+        w.run_import([str(self.path / '없는 파일.yaml')])
+        self.assertEqual(self.warnings[-1][0], '불러오기')
 
     def test_T29_warning_only_shows_results(self):
         w = self.generated([project(excluded=[4, 4]), project('사업2')],
@@ -258,7 +261,8 @@ class GuiTests(unittest.TestCase):
     def test_T30_edit_tables_and_generate_unsaved(self):
         p, h = self.write([project(), project('사업2')], [person({'사업1': '0.60000', '사업2': '0.40000'})])
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         editor, alloc, matrix = w.people_editor, w.people_editor.allocations, w.people_editor.overview.matrix
         self.assertEqual([w.project_editor.table.item(0, c).text() for c in range(4)],
                          ['사업1', '사업1', '2027-01-01', '2027-12-31'])
@@ -322,7 +326,8 @@ class GuiTests(unittest.TestCase):
     def test_T30_absences_and_year(self):
         _, h = self.write([project(year=2026)], [person({'사업1': '0.95430'})], year=2026)
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         editor = w.people_editor
         self.assertEqual(self.matrix_texts(w)[0][2:], ['0.95430', '0.00000', '0.95430'])
         editor.add_absence()
@@ -344,7 +349,8 @@ class GuiTests(unittest.TestCase):
     def test_T30_project_editing_rename_and_remove(self):
         _, h = self.write([project(), project('사업2')], [person({'사업1': '0.60000', '사업2': '0.40000'})])
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         table, grid = w.project_editor.table, w.project_editor.grid
         # 약칭을 바꾸면 사람 참여율도 따라간다.
         table.item(0, 1).setText('연구')
@@ -388,7 +394,7 @@ class GuiTests(unittest.TestCase):
         text = p.read_text(encoding='utf-8').replace('- name: 사업1', '- id: 7\n  name: 사업1')
         p.write_text(text, encoding='utf-8')
         w = self.window()
-        w.choose_people(str(h))
+        w.run_import([str(h)])
         self.assertEqual(self.warnings[-1][0], '지원하지 않는 항목')
         self.assertIn('projects[0].id', self.warnings[-1][1])
         matrix = w.people_editor.overview.matrix
@@ -403,31 +409,37 @@ class GuiTests(unittest.TestCase):
         w.people_editor.remove_row()
         self.assertEqual(matrix.columnCount(), 5)
 
-    def test_T30_save_backup_and_new_documents(self):
+    def test_T30_export_backup_and_new_all(self):
         p, h = self.write([project()], [person()])
         original = p.read_text(encoding='utf-8')
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(p), str(h)])
+        self.assertEqual(errors, [])
         w.project_editor.table.item(0, 0).setText('연구 지원 사업')
-        self.assertTrue(w.save('projects'))
-        self.assertEqual((self.path / 'projects.yaml.bak').read_text(encoding='utf-8'), original)
+        out = self.path / 'out'
+        (out / 'people').mkdir(parents=True)
+        (out / 'projects.yaml').write_text(original, encoding='utf-8')
+        self.assertTrue(w.export_all(str(out)))
+        self.assertEqual((out / 'projects.yaml.bak').read_text(encoding='utf-8'), original)
         self.assertEqual(w.input_tabs.tabText(w.PROJECTS_TAB), '사업 입력')
-        self.assertIn('"연구 지원 사업"', p.read_text(encoding='utf-8'))
-        # 같은 실행에서 다시 저장해도 첫 원본 백업은 그대로 둔다.
+        self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력')
+        self.assertIn('"연구 지원 사업"', (out / 'projects.yaml').read_text(encoding='utf-8'))
+        self.assertTrue((out / 'people' / 'people_2027.yaml').is_file())
+        # 같은 실행에서 다시 내보내도 첫 원본 백업은 그대로 둔다.
         w.project_editor.table.item(0, 0).setText('운영')
-        self.assertTrue(w.save_all())
-        self.assertEqual((self.path / 'projects.yaml.bak').read_text(encoding='utf-8'), original)
+        self.assertTrue(w.export_all(str(out)))
+        self.assertEqual((out / 'projects.yaml.bak').read_text(encoding='utf-8'), original)
 
-        # 새로 만들기 → 입력 → 다른 이름으로 저장한 파일은 CLI와 같은 규칙으로 읽힌다.
-        w.new_document('projects')
-        w.new_document('people')
-        self.assertEqual(w.projects_edit.text(), '')
+        # 새로 만들기 → 입력 → 내보낸 파일은 CLI와 같은 규칙으로 읽힌다.
+        w.new_all()
+        self.assertEqual(w.projects_label.text(), '사업 0개')
+        self.assertEqual(w.year_combo.count(), 1)
         pe, me = w.project_editor, w.people_editor
         pe.add_project()
         for column, value in enumerate(['새 사업', '새사업', '2026-01-01', '2026-12-31']):
             pe.table.item(0, column).setText(value)
-        pe.grid.item(0, 2).setText('2')  # 관리 연도 2026 → 2024~2029의 세 번째 열
         me.year_edited('2026')
+        pe.grid.item(0, 2).setText('2')  # 관리 연도 2026 → 2024~2029의 세 번째 열
         me.add_person()
         self.assertEqual(me.doc.people[0].name, '새 사람')
         me.people_list.item(0).setText('이영희')
@@ -439,29 +451,31 @@ class GuiTests(unittest.TestCase):
         w.generate()
         self.assertTrue(w.excel_button.isEnabled(), self.texts(w.issue_view))
         folder = self.path / 'new'
-        folder.mkdir()
-        self.save_paths = [str(folder / 'projects.yaml'), str(folder / 'people_2026.yaml')]
-        self.assertTrue(w.save_all())
-        inputs, issues = load_inputs(folder / 'projects.yaml', folder / 'people_2026.yaml')
+        self.assertTrue(w.export_all(str(folder)))
+        inputs, issues = load_inputs(folder / 'projects.yaml', folder / 'people' / 'people_2026.yaml')
         self.assertIsNotNone(inputs, issues)
         self.assertEqual(inputs.people['이영희'].targets, {'새사업': 100000})
         self.assertFalse((folder / 'projects.yaml.bak').exists())
 
-        # 저장하지 않은 변경이 있으면 다른 파일을 열기 전에 묻는다.
+        # 내보내지 않은 변경이 있으면 새로 만들기 전에 묻는다.
         me.allocations.item(0, 1).setText('0.9')
-        self.save_answers = ['cancel']
-        w.choose_people(str(h))
-        self.assertEqual(w.people_edit.text(), str(folder / 'people_2026.yaml'))
-        self.save_answers = ['discard']
-        w.choose_people(str(h))
-        self.assertEqual(w.people_edit.text(), str(h))
+        self.export_answers = ['cancel']
+        w.new_all()
+        self.assertEqual(w.people_editor.doc.people[0].allocations['새사업'], '0.9')
+        self.assertEqual(len(w.project_editor.projects), 1)
+        self.export_answers = ['discard']
+        w.new_all()
+        self.assertEqual(w.project_editor.projects, [])
+        self.assertEqual(w.people_editor.doc.people, [])
+        self.assertEqual(len(w.people_docs), 1)
 
     # --- T31 입력 화면과 결과 화면 ---
 
     def test_result_page_auto_generates(self):
         _, h = self.write([project()], [person()])
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.pages.currentIndex(), w.RESULT_PAGE)
         self.assertEqual(w.result_tabs.currentIndex(), w.SUMMARY_TAB)
@@ -487,14 +501,15 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.result_tabs.currentIndex(), w.ISSUES_TAB)
         self.assertIn('E003', [row[1] for row in self.texts(w.issue_view)])
         self.assertFalse(w.excel_button.isEnabled())
-        self.assertIn('(새 사람 파일)', w.result_header.text())
+        self.assertRegex(w.result_header.text(), r'\(새 \d{4} 입력\)')
         w.show_page(w.INPUT_PAGE)
 
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.result_tabs.currentIndex(), w.SUMMARY_TAB)
         self.assertTrue(w.excel_button.isEnabled())
-        # 입력 화면에서 값을 고치면 메뉴에 저장 안 한 표시가 붙고,
+        # 입력 화면에서 값을 고치면 메뉴에 내보내지 않은 표시가 붙고,
         # 결과 화면으로 돌아오면 고친 입력으로 다시 계산한다.
         w.show_page(w.INPUT_PAGE)
         w.people_editor.allocations.item(0, 1).setText('0.5')
@@ -503,16 +518,18 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.result_tabs.currentIndex(), w.ISSUES_TAB)
         self.assertIn('입력 화면에서 고친 뒤 결과 화면으로 돌아오세요', w.result_header.text())
         self.assertFalse(w.excel_button.isEnabled())
-        # 고친 값을 저장하면 메뉴 표시가 사라진다.
+        # 고친 값을 내보내면 메뉴 표시가 사라진다.
         w.show_page(w.INPUT_PAGE)
         w.people_editor.allocations.item(0, 1).setText('1')
-        self.assertTrue(w.save('people'))
+        self.assertTrue(w.export_all(str(self.path / 'out')))
         self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력')
         w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.result_tabs.currentIndex(), w.SUMMARY_TAB)
-        # 새로 만들기는 입력 화면의 해당 탭으로 돌아간다.
-        w.new_document('people')
-        self.assertEqual((w.pages.currentIndex(), w.input_tabs.currentIndex()), (w.INPUT_PAGE, w.PEOPLE_TAB))
+        # 새로 만들기는 전체를 비우고 입력 화면으로 돌아간다.
+        w.new_all()
+        self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
+        self.assertEqual(w.project_editor.projects, [])
+        self.assertEqual(len(w.people_docs), 1)
         menus = {a.text(): a.menu() for a in w.menuBar().actions()}
         actions = {a.text(): a for a in menus['보기'].actions()}
         self.assertEqual(actions['입력 화면'].shortcut().toString(), 'Ctrl+1')
@@ -534,7 +551,8 @@ class GuiTests(unittest.TestCase):
                                  2032: {'allocated_manpower': '0.5'}}
         _, h = self.write(projects, [person({'사업1': '0.60000', '사업2': '0.40000'})])
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         pe = w.project_editor
         table, grid = pe.table, pe.grid
         headers = [grid.horizontalHeaderItem(c).text() for c in range(grid.columnCount())]
@@ -642,7 +660,8 @@ class GuiTests(unittest.TestCase):
                                  2032: {'allocated_manpower': '0.5'}}
         _, h = self.write(projects, [person({'사업1': '0.60000', '사업2': '0.40000'})])
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         pe, grid = w.project_editor, w.project_editor.grid
         headers = [grid.horizontalHeaderItem(c).text() for c in range(grid.columnCount())]
         self.assertEqual(headers, ['2025', '2026', '2027', '2028', '2029', '2030', '2027 제외월'])
@@ -670,7 +689,8 @@ class GuiTests(unittest.TestCase):
         text = p.read_text(encoding='utf-8').replace('2027:', "'20x7':\n      allocated_manpower: '1'\n    2027:")
         p.write_text(text, encoding='utf-8')
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         self.assertIn('표시할 수 없는 연도 항목 1건', w.project_editor.notice.text())
         # 표시할 수 없는 항목도 총 배정에는 더한다(10 + 1).
         self.assertEqual(w.project_editor.table.item(0, w.project_editor.TOTAL).text(), '11.00000')
@@ -685,7 +705,8 @@ class GuiTests(unittest.TestCase):
         _, h = self.write(projects, [person({'운영': '0.7', '연구': '0.3'}),
                                      person({'운영': '1'}, name='김철수')])
         w = self.window()
-        w.choose_people(str(h))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
         editor = w.people_editor
         self.assertEqual([editor.people_list.item(i).text() for i in range(editor.people_list.count())],
                          ['홍길동', '김철수'])
@@ -731,6 +752,195 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(editor.doc.people[0].absences, [])
         self.assertIn('공백 1.00000', editor.totals.text())
 
+    # --- 다중 문서: 연도별 불러오기·합치기 ---
+
+    def test_import_merges_and_skips_duplicates(self):
+        pa = self.path / 'a.yaml'
+        pb = self.path / 'sub' / 'b.yaml'
+        pb.parent.mkdir()
+        pa.write_text(yaml.safe_dump({'projects': [project('사업A')]}, allow_unicode=True), encoding='utf-8')
+        pb.write_text(yaml.safe_dump({'projects': [project('사업B')]}, allow_unicode=True), encoding='utf-8')
+        h1 = self.path / 'h1.yaml'
+        h2 = self.path / 'h2.yaml'
+        h3 = self.path / 'h3.yaml'
+        h4 = self.path / 'h4.yaml'
+        h1.write_text(yaml.safe_dump({'year': 2027, 'people': [person({'사업A': '1'})]},
+                                      allow_unicode=True), encoding='utf-8')
+        h2.write_text(yaml.safe_dump({'year': 2027, 'people': [person({'사업A': '1'}, name='김철수')]},
+                                      allow_unicode=True), encoding='utf-8')
+        h3.write_text(yaml.safe_dump({'year': 2026, 'people': [person({'사업A': '1'}, name='이영희')]},
+                                      allow_unicode=True), encoding='utf-8')
+        h4.write_text(yaml.safe_dump({'year': 2027, 'people': [person({'사업A': '1'})]},
+                                      allow_unicode=True), encoding='utf-8')
+        bad = self.path / 'bad.yaml'
+        bad.write_text('foo: 1\n', encoding='utf-8')
+        w = self.window()
+        errors, _ = w.import_files([str(pa)])
+        self.assertEqual(errors, [])
+        self.assertFalse(w.projects_dirty)  # 채우기는 깨끗함
+        errors, _ = w.import_files([str(pb)])
+        self.assertEqual(errors, [])
+        self.assertTrue(w.projects_dirty)  # 합치기는 내보내기 필요
+        self.assertEqual([p.alias for p in w.project_editor.projects], ['사업A', '사업B'])
+        self.assertEqual(w.projects_label.text(), '사업 2개 · 2개 파일 합침 *')
+        errors, _ = w.import_files([str(pa)])
+        self.assertEqual(len(errors), 1)
+        self.assertIn('겹칩니다', errors[0])
+        self.assertEqual(len(w.project_editor.projects), 2)
+        errors, _ = w.import_files([str(h1)])
+        self.assertEqual(errors, [])
+        self.assertEqual(w.current_year, '2027')
+        self.assertFalse(w.people_dirty['2027'])
+        errors, _ = w.import_files([str(h2)])
+        self.assertEqual(errors, [])
+        self.assertTrue(w.people_dirty['2027'])
+        self.assertEqual([p.name for p in w.people_docs['2027'].people], ['홍길동', '김철수'])
+        errors, _ = w.import_files([str(h4)])
+        self.assertEqual(len(errors), 1)
+        self.assertIn('홍길동', errors[0])
+        self.assertEqual(len(w.people_docs['2027'].people), 2)
+        errors, _ = w.import_files([str(h3)])
+        self.assertEqual(errors, [])
+        self.assertTrue({'2026', '2027'} <= set(w.people_docs))
+        self.assertEqual(w.current_year, '2026')
+        errors, _ = w.import_files([str(bad)])
+        self.assertEqual(len(errors), 1)
+        self.assertIn('사업 파일도 사람 파일도 아닙니다', errors[0])
+
+    def test_year_docs_switch_compute_and_export(self):
+        proj = project(period='2026-01-01~2027-12-31')
+        proj['yearly'] = {2026: {'allocated_manpower': '2'}, 2027: {'allocated_manpower': '2'}}
+        p = self.path / 'projects.yaml'
+        p.write_text(yaml.safe_dump({'projects': [proj]}, allow_unicode=True, sort_keys=False), encoding='utf-8')
+        h26 = self.path / 'h26.yaml'
+        h27 = self.path / 'h27.yaml'
+        h26.write_text(yaml.safe_dump({'year': 2026, 'people': [person({'사업1': '1'})]},
+                                       allow_unicode=True), encoding='utf-8')
+        h27.write_text(yaml.safe_dump({'year': 2027, 'people': [person({'사업1': '1'}),
+                                                                person({'사업1': '1'}, name='김철수')]},
+                                       allow_unicode=True), encoding='utf-8')
+        w = self.window()
+        errors, _ = w.import_files([str(p), str(h26), str(h27)])
+        self.assertEqual(errors, [])
+        w.select_year('2026')
+        w.generate()
+        self.assertIn('관리 연도 2026', w.result_header.text())
+        self.assertTrue(w.excel_button.isEnabled())
+        self.assertEqual(w.person_list.count(), 1)
+        # 2026을 고치고 다른 연도로 가도 편집이 유지된다.
+        w.people_editor.allocations.item(0, 1).setText('0.5')
+        w.select_year('2027')
+        w.generate()
+        self.assertIn('관리 연도 2027', w.result_header.text())
+        self.assertTrue(w.excel_button.isEnabled())
+        self.assertEqual(w.person_list.count(), 2)
+        w.select_year('2026')
+        self.assertEqual(w.people_editor.doc.people[0].allocations['사업1'], '0.5')
+        w.generate()
+        self.assertEqual(w.result_tabs.currentIndex(), w.ISSUES_TAB)
+        self.assertIn('E101', [row[1] for row in self.texts(w.issue_view)])
+        # 콤보로도 연도를 바꾼다.
+        w.year_combo.setCurrentIndex(w.year_combo.findData('2027'))
+        self.assertEqual(w.current_year, '2027')
+        # 내보내기는 연도별 파일을 쓴다.
+        out = self.path / 'out'
+        self.assertTrue(w.export_all(str(out)))
+        self.assertTrue((out / 'projects.yaml').is_file())
+        self.assertTrue((out / 'people' / 'people_2026.yaml').is_file())
+        self.assertTrue((out / 'people' / 'people_2027.yaml').is_file())
+
+    def test_add_close_and_rename_year(self):
+        w = self.window()
+        today = w.current_year
+        self.year_answers = ['2030']
+        w.add_year()
+        self.assertEqual(w.current_year, '2030')
+        self.assertIn('2030', w.people_docs)
+        self.assertFalse(w.people_dirty['2030'])
+        self.year_answers = ['2030']
+        w.add_year()  # 이미 열려 있으면 전환만 한다.
+        self.assertEqual(w.current_year, '2030')
+        self.assertEqual(len(w.people_docs), 2)
+        self.year_answers = ['20x6']
+        w.add_year()
+        self.assertEqual(self.warnings[-1][0], '연도 추가')
+        self.assertNotIn('20x6', w.people_docs)
+        self.year_answers = ['']
+        w.add_year()
+        self.assertEqual(len(w.people_docs), 2)
+        # 연도 입력칸 타이핑은 계산할 때 확정된다.
+        w.people_editor.year_edited('2031')
+        self.assertEqual(w.current_year, '2030')
+        w.generate()  # 빈 입력이라 E003이어도 확정은 된다.
+        self.assertEqual(w.current_year, '2031')
+        self.assertIn('2031', w.people_docs)
+        # 겹치거나 잘못된 연도로는 확정할 수 없고 계산도 멈춘다.
+        w.people_editor.year_edited(today)
+        w.generate()
+        self.assertEqual(self.warnings[-1][0], '연도 입력')
+        self.assertEqual(w.current_year, '2031')
+        self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
+        w.people_editor.year_edited('20x6')
+        w.generate()
+        self.assertEqual(self.warnings[-1][0], '연도 입력')
+        self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
+        w.people_editor.year_edited('2031')
+        # 연도 닫기: 변경분은 묻고, 마지막 하나는 거부한다.
+        self.export_answers = ['discard']
+        w.close_year('2031')
+        self.assertNotIn('2031', w.people_docs)
+        self.assertEqual(w.current_year, today)
+        self.year_answers = ['2032']
+        w.add_year()
+        w.people_editor.add_person()
+        w.people_editor.people_list.item(0).setText('김신입')
+        self.export_answers = ['cancel']
+        w.close_year()
+        self.assertIn('2032', w.people_docs)
+        self.assertEqual(len(w.people_docs['2032'].people), 1)
+        self.export_answers = ['discard']
+        w.close_year()
+        self.assertNotIn('2032', w.people_docs)
+        self.assertEqual(w.current_year, today)
+        w.close_year()
+        self.assertEqual(len(w.people_docs), 1)
+        # 새로 만들기에서 내보내기를 고르면 쓰고 나서 비운다.
+        w.people_editor.add_person()
+        self.export_answers = ['export']
+        self.export_folders = [str(self.path / 'exp')]
+        w.new_all()
+        self.assertTrue((self.path / 'exp' / 'people' / f'people_{today}.yaml').is_file())
+        self.assertEqual(w.people_editor.doc.people, [])
+        self.assertEqual(w.project_editor.projects, [])
+
+    def test_alias_operations_span_years(self):
+        p = self.path / 'proj.yaml'
+        h26 = self.path / 'y26.yaml'
+        h27 = self.path / 'y27.yaml'
+        p.write_text(yaml.safe_dump({'projects': [project(), project('사업2')]}, allow_unicode=True,
+                                     sort_keys=False), encoding='utf-8')
+        h26.write_text(yaml.safe_dump({'year': 2026, 'people': [person({'사업1': '1'})]},
+                                       allow_unicode=True), encoding='utf-8')
+        h27.write_text(yaml.safe_dump({'year': 2027, 'people': [person({'사업1': '0.6', '사업2': '0.4'})]},
+                                       allow_unicode=True), encoding='utf-8')
+        w = self.window()
+        errors, _ = w.import_files([str(p), str(h26), str(h27)])
+        self.assertEqual(errors, [])
+        # 개명은 모든 연도에 반영하고 연도별로 표시한다.
+        w.project_editor.table.item(0, 1).setText('사업1X')
+        self.assertEqual(w.people_docs['2026'].people[0].allocations, {'사업1X': '1'})
+        self.assertEqual(w.people_docs['2027'].people[0].allocations, {'사업1X': '0.6', '사업2': '0.4'})
+        self.assertTrue(w.people_dirty['2026'] and w.people_dirty['2027'])
+        self.assertTrue(w.export_all(str(self.path / 'out')))
+        # 삭제는 쓴 연도만 건드린다.
+        w.project_editor.table.setCurrentCell(1, 0)
+        w.project_editor.remove_project()
+        self.assertEqual([pr.alias for pr in w.project_editor.projects], ['사업1X'])
+        self.assertEqual(w.people_docs['2027'].people[0].allocations, {'사업1X': '0.6'})
+        self.assertEqual(w.people_docs['2026'].people[0].allocations, {'사업1X': '1'})
+        self.assertTrue(w.people_dirty['2027'])
+        self.assertFalse(w.people_dirty['2026'])
+
     def test_people_year_row_stays_compact(self):
         from allocation.editor import PeopleEditor
         editor = PeopleEditor(lambda: [])
@@ -746,19 +956,27 @@ class GuiTests(unittest.TestCase):
     def test_T29_find_projects_file(self):
         p, h = self.write([project()], [person()])
         w = self.window()
-        w.choose_people(str(h))
-        self.assertEqual(w.projects_edit.text(), str(p.resolve()))
-        # 자동으로 채운 값은 다른 사람 파일을 고를 때 다시 찾는다.
-        (self.path / 'people' / 'projects.yaml').write_text('', encoding='utf-8')
-        w.choose_people(str(h))
-        self.assertEqual(w.projects_edit.text(), str((self.path / 'people' / 'projects.yaml').resolve()))
-        # 직접 고른 사업 파일은 덮어쓰지 않는다.
-        chosen = self.path / 'other' / 'projects.yaml'
-        chosen.parent.mkdir()
-        chosen.write_bytes(p.read_bytes())
-        w.choose_projects(str(chosen))
-        w.choose_people(str(h))
-        self.assertEqual(w.projects_edit.text(), str(chosen))
+        errors, _ = w.import_files([str(h)])
+        self.assertEqual(errors, [])
+        self.assertEqual(w.projects_sources, [str(p.resolve())])
+        # 사업 입력이 있으면 다른 사람 파일을 열어도 자동으로 바꾸지 않는다.
+        h2 = self.path / 'people' / 'other.yaml'
+        h2.write_text(yaml.safe_dump({'year': 2026, 'people': [person({'사업1': '1'}, name='김철수')]},
+                                      allow_unicode=True, sort_keys=False), encoding='utf-8')
+        (self.path / 'people' / 'projects.yaml').write_text(
+            yaml.safe_dump({'projects': [project('가까운사업')]}, allow_unicode=True, sort_keys=False),
+            encoding='utf-8')
+        errors, _ = w.import_files([str(h2)])
+        self.assertEqual(errors, [])
+        self.assertEqual(w.projects_sources, [str(p.resolve())])
+        # 비어 있을 때는 사람 파일 폴더를 바로 위 폴더보다 먼저 찾는다.
+        fresh = MainWindow(QSettings(str(self.path / 'fresh.ini'), QSettings.IniFormat))
+        fresh.warn = lambda title, text: self.warnings.append((title, text))
+        self.addCleanup(fresh.deleteLater)
+        errors, _ = fresh.import_files([str(h)])
+        self.assertEqual(errors, [])
+        self.assertEqual(fresh.projects_sources, [str((self.path / 'people' / 'projects.yaml').resolve())])
+        self.assertEqual([pr.alias for pr in fresh.project_editor.projects], ['가까운사업'])
         # 사람 파일 폴더와 바로 위 폴더만 찾고 그보다 위는 보지 않는다.
         empty = self.path / 'a' / 'b' / 'people.yaml'
         empty.parent.mkdir(parents=True)

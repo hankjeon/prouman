@@ -8,13 +8,14 @@ from pathlib import Path
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt,
                             qInstallMessageHandler)
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame,
+                               QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton,
                                QSizePolicy, QSplitter, QStackedWidget, QTableView, QTabWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
 from . import theme
-from .document import DocumentError, PeopleDoc, dump_people, dump_projects, read_people, read_projects
+from .document import (DocumentError, PeopleDoc, detect_kind, dump_people, dump_projects, read_people,
+                       read_projects, valid_year)
 from .editor import PeopleEditor, ProjectEditor, SelectionDelegate
 from .engine import calculate
 from .loading import decode_text, load_inputs
@@ -149,30 +150,43 @@ class MainWindow(QMainWindow):
         self.issues = []
         self.generated_at = None  # 마지막 계산 시각. 결과 화면을 열 때마다 새로 계산한다.
         self.generated_from = ()  # 계산할 때의 사업·사람 파일 표시 이름
-        self.auto_projects = None
-        self.dirty = {'projects': False, 'people': False}
-        self.backed_up = set()  # 이번 실행에서 .bak을 만든 파일. 첫 저장 직전의 원본만 백업한다.
+        self.people_docs = {}  # 연도 -> PeopleDoc. 같은 연도는 합쳐서 하나로, 다른 연도는 따로 둔다.
+        self.people_dirty = {}  # 연도 -> 미내보내기 변경 여부
+        self.people_sources = {}  # 연도 -> 불러온 파일들
+        self.projects_sources = []  # 합친 사업 파일들
+        self.projects_dirty = False
+        self.loaded_files = []  # 다시 시작할 때 불러올 경로. 불러온 순서대로 둔다.
+        self.current_year = None  # 고른 연도. 편집·계산 대상이다.
+        self.backed_up = set()  # 이번 실행에서 .bak을 만든 파일. 첫 내보내기 직전의 원본만 백업한다.
         self.setWindowTitle('인력 배분')
         self.resize(1280, 800)
 
-        # 입력 화면: 파일 줄, 사업·사람 입력 탭
-        self.projects_edit, self.people_edit = QLineEdit(), QLineEdit()
-        self.edits = {'projects': self.projects_edit, 'people': self.people_edit}
-        files = QGridLayout()
-        for row, kind in enumerate(KINDS):
-            edit = self.edits[kind]
-            edit.setReadOnly(True)
-            edit.setPlaceholderText('(새 파일 - 아직 저장하지 않음)')
-            buttons = [('열기', self.browse_projects if kind == 'projects' else self.browse_people),
-                       ('새로 만들기', lambda checked=False, kind=kind: self.new_document(kind)),
-                       ('저장', lambda checked=False, kind=kind: self.save(kind)),
-                       ('다른 이름으로', lambda checked=False, kind=kind: self.save_as(kind))]
-            files.addWidget(QLabel(f'{KINDS[kind]} 파일'), row, 0)
-            files.addWidget(edit, row, 1)
-            for column, (text, slot) in enumerate(buttons, 2):
-                button = QPushButton(text)
-                button.clicked.connect(slot)
-                files.addWidget(button, row, column)
+        # 입력 화면: 불러오기·내보내기·새로 만들기, 열린 문서 목록, 사업·사람 입력 탭
+        import_button = QPushButton('불러오기')
+        import_button.clicked.connect(self.browse_import)
+        export_button = QPushButton('내보내기')
+        export_button.clicked.connect(self.browse_export)
+        new_button = QPushButton('새로 만들기')
+        new_button.clicked.connect(self.new_all)
+        self.projects_label = QLabel()
+        files_row = QHBoxLayout()
+        files_row.addWidget(import_button)
+        files_row.addWidget(export_button)
+        files_row.addWidget(new_button)
+        files_row.addStretch()
+        files_row.addWidget(self.projects_label)
+        self.year_combo = QComboBox()
+        self.year_combo.currentIndexChanged.connect(self.year_combo_changed)
+        add_year_button = QPushButton('연도 추가')
+        add_year_button.clicked.connect(self.add_year)
+        close_year_button = QPushButton('연도 닫기')
+        close_year_button.clicked.connect(lambda checked=False: self.close_year())
+        year_row = QHBoxLayout()
+        year_row.addWidget(QLabel('연도'))
+        year_row.addWidget(self.year_combo)
+        year_row.addWidget(add_year_button)
+        year_row.addWidget(close_year_button)
+        year_row.addStretch()
         self.project_editor = ProjectEditor()
         self.people_editor = PeopleEditor(lambda: self.project_editor.projects)
         self.project_editor.managed_year = lambda: self.people_editor.doc.year
@@ -180,8 +194,8 @@ class MainWindow(QMainWindow):
         self.project_editor.allow_remove = self.allow_remove_project
         self.project_editor.changed.connect(self.projects_changed)
         self.project_editor.alias_renamed.connect(self.alias_renamed)
-        self.project_editor.alias_removed.connect(self.people_editor.remove_alias)
-        self.people_editor.changed.connect(lambda: self.set_dirty('people', True))
+        self.project_editor.alias_removed.connect(self.remove_alias_everywhere)
+        self.people_editor.changed.connect(self.people_changed)
         self.input_tabs = QTabWidget()
         self.input_tabs.addTab(self.project_editor, '사업 입력')
         self.input_tabs.addTab(self.people_editor, '사람 입력')
@@ -189,7 +203,8 @@ class MainWindow(QMainWindow):
         self.people_editor.overview.person_requested.connect(self.open_person)
         input_page = QWidget()
         layout = QVBoxLayout(input_page)
-        layout.addLayout(files)
+        layout.addLayout(files_row)
+        layout.addLayout(year_row)
         layout.addWidget(self.input_tabs)
 
         # 결과 화면: 머리 줄(계산 정보·엑셀 저장), 결과 탭
@@ -277,10 +292,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         file_menu = self.menuBar().addMenu('파일')
-        save_all = QAction('모두 저장', self)
-        save_all.setShortcut(QKeySequence.Save)
-        save_all.triggered.connect(self.save_all)
-        file_menu.addAction(save_all)
+        for text, shortcut, slot in (('불러오기', QKeySequence.Open, self.browse_import),
+                                    ('내보내기', QKeySequence.Save, self.browse_export),
+                                    ('새로 만들기', None, self.new_all),
+                                    ('연도 추가', None, self.add_year)):
+            action = QAction(text, self)
+            if shortcut is not None:
+                action.setShortcut(shortcut)
+            action.triggered.connect(lambda checked=False, slot=slot: slot())
+            file_menu.addAction(action)
         view_menu = self.menuBar().addMenu('보기')
         for page, text, key in ((self.INPUT_PAGE, '입력 화면', 'Ctrl+1'), (self.RESULT_PAGE, '결과 화면', 'Ctrl+2')):
             action = QAction(text, self)
@@ -299,32 +319,30 @@ class MainWindow(QMainWindow):
         self.show_page(self.INPUT_PAGE)
         self.show_result_header()
 
-        # 지난번 파일을 다시 연다. 열 수 없으면 조용히 빈 입력으로 시작한다.
-        for kind in KINDS:
-            path = self.settings.value(f'{kind}_file', '', type=str)
-            if path and Path(path).is_file():
-                self.load(kind, path, quiet=True)
+        self.restore_or_default()
 
     # --- 공통 대화상자 (테스트에서 바꿔 끼운다) ---
 
     def warn(self, title, text):
         QMessageBox.warning(self, title, text)
 
-    def ask_save(self, kind):
-        """저장하지 않은 변경이 있을 때 'save' / 'discard' / 'cancel'을 돌려준다."""
+    def ask_export(self, desc):
+        """내보내지 않은 변경이 있을 때 'export' / 'discard' / 'cancel'을 돌려준다."""
         answer = QMessageBox.question(
-            self, '저장하지 않은 변경', f'{KINDS[kind]} 입력에 저장하지 않은 변경이 있습니다. 저장할까요?',
+            self, '내보내지 않은 변경', f'{desc}에 내보내지 않은 변경이 있습니다. 내보낼까요?',
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
-        return {QMessageBox.Save: 'save', QMessageBox.Discard: 'discard'}.get(answer, 'cancel')
+        return {QMessageBox.Save: 'export', QMessageBox.Discard: 'discard'}.get(answer, 'cancel')
 
     def confirm(self, title, text):
         return QMessageBox.question(self, title, text) == QMessageBox.Yes
 
-    def ask_save_path(self, kind):
-        default = 'projects.yaml' if kind == 'projects' else f'people_{self.people_editor.doc.year}.yaml'
-        path, _ = QFileDialog.getSaveFileName(self, f'{KINDS[kind]} 파일 저장',
-                                              str(Path(self.start_folder() or '.') / default), YAML_FILTER)
-        return path
+    def ask_export_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, '내보내기 폴더 선택', self.start_folder('export') or '.')
+        return folder
+
+    def ask_year(self):
+        text, ok = QInputDialog.getText(self, '연도 추가', '연도 (4자리):')
+        return text if ok else ''
 
     # --- 글자 크기 ---
 
@@ -387,23 +405,66 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.ApplicationPaletteChange:
             self.apply_theme_styles()
 
-    def set_dirty(self, kind, dirty):
-        self.dirty[kind] = dirty
-        index = self.PROJECTS_TAB if kind == 'projects' else self.PEOPLE_TAB
-        self.input_tabs.setTabText(index, f'{KINDS[kind]} 입력' + (' *' if dirty else ''))
-        self.nav_buttons[self.INPUT_PAGE].setText('✎  입력' + (' *' if any(self.dirty.values()) else ''))
+    def set_projects_dirty(self, dirty):
+        self.projects_dirty = dirty
+        self.refresh_marks()
+
+    def set_people_dirty(self, year, dirty):
+        if year in self.people_dirty:
+            self.people_dirty[year] = dirty
+        self.refresh_marks()
+
+    def people_changed(self):
+        self.set_people_dirty(self.current_year, True)
+
+    def refresh_marks(self):
+        """탭·메뉴·연도 목록·사업 줄에 미내보내기 표시(*)를 다시 그린다."""
+        self.input_tabs.setTabText(self.PROJECTS_TAB, '사업 입력' + (' *' if self.projects_dirty else ''))
+        any_people = any(self.people_dirty.values())
+        self.input_tabs.setTabText(self.PEOPLE_TAB, '사람 입력' + (' *' if any_people else ''))
+        self.nav_buttons[self.INPUT_PAGE].setText('✎  입력' + (' *' if self.projects_dirty or any_people else ''))
+        self.refresh_year_combo()
+        self.refresh_projects_label()
+
+    def refresh_year_combo(self):
+        combo = self.year_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for year in sorted(self.people_docs):
+            combo.addItem(year + (' *' if self.people_dirty.get(year) else ''), year)
+        if self.current_year in self.people_docs:
+            combo.setCurrentIndex(combo.findData(self.current_year))
+        combo.blockSignals(False)
+
+    def refresh_projects_label(self):
+        text = f'사업 {len(self.project_editor.projects)}개'
+        if len(self.projects_sources) == 1:
+            text += f' · {Path(self.projects_sources[0]).name}'
+        elif self.projects_sources:
+            text += f' · {len(self.projects_sources)}개 파일 합침'
+        if self.projects_dirty:
+            text += ' *'
+        self.projects_label.setText(text)
+        self.projects_label.setToolTip('\n'.join(self.projects_sources) if self.projects_sources else '불러온 사업 파일 없음')
 
     def projects_changed(self):
-        self.set_dirty('projects', True)
+        self.set_projects_dirty(True)
         self.people_editor.refresh()
 
     def alias_renamed(self, old, new):
-        if self.people_editor.count_alias(old):
-            self.set_dirty('people', True)
-        self.people_editor.rename_alias(old, new)
+        for year, doc in self.people_docs.items():
+            if self.people_editor.count_alias(old, doc):
+                self.people_editor.rename_alias(old, new, doc)
+                self.set_people_dirty(year, True)
+
+    def remove_alias_everywhere(self, alias):
+        for year, doc in self.people_docs.items():
+            if any(alias in person.allocations for person in doc.people):
+                self.people_editor.remove_alias(alias, doc)
+                self.set_people_dirty(year, True)
 
     def allow_remove_project(self, project):
-        count = self.people_editor.count_alias(project.alias)
+        count = sum(self.people_editor.count_alias(project.alias, doc) for doc in self.people_docs.values())
         name = project.name or project.alias or '(이름 없음)'
         text = f'사업 "{name}"을(를) 삭제할까요?'
         if count:
@@ -411,123 +472,282 @@ class MainWindow(QMainWindow):
         if not self.confirm('사업 삭제', text):
             return False
         if count:
-            self.set_dirty('people', True)
+            for year, doc in self.people_docs.items():
+                if self.people_editor.count_alias(project.alias, doc):
+                    self.set_people_dirty(year, True)
         return True
 
-    def keep_changes(self, kind):
-        """다른 파일로 바꾸기 전에 저장하지 않은 변경을 처리한다. 진행해도 되면 True."""
-        if not self.dirty[kind]:
+    def keep_all(self, what='입력'):
+        """내보내지 않은 변경을 처리한다. 진행해도 되면 True."""
+        if not (self.projects_dirty or any(self.people_dirty.values())):
             return True
-        answer = self.ask_save(kind)
-        return answer == 'discard' or answer == 'save' and self.save(kind)
+        answer = self.ask_export(what)
+        return answer == 'discard' or answer == 'export' and self.browse_export()
 
-    def start_folder(self):
-        for text in (self.people_edit.text(), self.projects_edit.text()):
-            if text and Path(text).parent.is_dir():
-                return str(Path(text).parent)
+    def keep_year(self, year):
+        """해당 연도의 변경을 처리한다. 진행해도 되면 True."""
+        if not self.people_dirty.get(year):
+            return True
+        answer = self.ask_export(f'{year}년 사람 입력')
+        return answer == 'discard' or answer == 'export' and self.browse_export()
+
+    def start_folder(self, which='import'):
+        if which == 'export':
+            candidates = [self.settings.value('export_folder', '', type=str),
+                          self.settings.value('import_folder', '', type=str)]
+        else:
+            candidates = [self.settings.value('import_folder', '', type=str),
+                          self.settings.value('export_folder', '', type=str)]
+        if self.loaded_files:
+            candidates.append(str(Path(self.loaded_files[-1]).parent))
+        for folder in candidates:
+            if folder and Path(folder).is_dir():
+                return folder
         return ''
 
-    def browse_projects(self):
-        path, _ = QFileDialog.getOpenFileName(self, '사업 파일 열기', self.start_folder(), YAML_FILTER)
-        if path:
-            self.choose_projects(path)
+    def browse_import(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, '불러오기', self.start_folder('import'), YAML_FILTER)
+        if paths:
+            self.settings.setValue('import_folder', str(Path(paths[0]).parent))
+            self.run_import(paths)
 
-    def browse_people(self):
-        path, _ = QFileDialog.getOpenFileName(self, '사람 파일 열기', self.start_folder(), YAML_FILTER)
-        if path:
-            self.choose_people(path)
+    def run_import(self, paths):
+        """불러온 뒤 실패·지원 외 항목을 모아 한 번씩만 알린다."""
+        errors, dropped = self.import_files(paths)
+        if errors:
+            self.warn('불러오기', '다음 파일은 열지 못했습니다:\n' + '\n'.join(errors))
+        if dropped:
+            lines = [f'{name}: {entry}' for name, entries in dropped for entry in entries]
+            self.warn('지원하지 않는 항목', '표 편집기에서 다루지 않는 다음 항목은 내보낼 때 빠집니다.\n'
+                      + '\n'.join(lines[:20]) + ('\n...' if len(lines) > 20 else ''))
 
-    def choose_projects(self, path):
-        if self.keep_changes('projects') and self.load('projects', path):
-            self.auto_projects = None
-
-    def choose_people(self, path):
-        if not self.keep_changes('people') or not self.load('people', path):
-            return
-        # 사업 파일을 직접 골랐거나 편집 중이면 바꾸지 않는다.
-        current = self.projects_edit.text()
-        if self.dirty['projects'] or current and current != self.auto_projects:
-            return
-        found = find_projects_file(path)
-        if found and self.load('projects', found):
-            self.auto_projects = found
-
-    def load(self, kind, path, quiet=False):
-        try:
-            text = decode_text(Path(path).read_bytes())
-            document, dropped = read_projects(text) if kind == 'projects' else read_people(text)
-        except (OSError, UnicodeError, DocumentError) as exc:
-            if quiet:
-                self.statusBar().showMessage(f'{KINDS[kind]} 파일을 열지 못했습니다: {path}')
+    def import_files(self, paths):
+        """파일을 추가로 불러온다. 성공한 것만 반영하고 (실패 설명, 지원 외 항목)을 돌려준다."""
+        errors, dropped, imported_people = [], [], []
+        for path in paths:
+            try:
+                text = decode_text(Path(path).read_bytes())
+                kind = detect_kind(text)
+                if kind is None:
+                    raise DocumentError('사업 파일도 사람 파일도 아닙니다.')
+                document, file_dropped = read_projects(text) if kind == 'projects' else read_people(text)
+            except (OSError, UnicodeError, DocumentError) as exc:
+                errors.append(f'{Path(path).name}: {exc}')
+                continue
+            if file_dropped:
+                dropped.append((Path(path).name, file_dropped))
+            if kind == 'projects':
+                dupes = sorted({p.alias.strip() for p in document}
+                               & {p.alias.strip() for p in self.project_editor.projects})
+                if dupes:
+                    errors.append(f'{Path(path).name}: 이미 열린 사업 약칭과 겹칩니다: '
+                                  + ', '.join(dupes[:5]) + (' 외' if len(dupes) > 5 else ''))
+                    continue
+                pristine = (not self.project_editor.projects and not self.projects_dirty
+                           and not self.projects_sources)
+                self.project_editor.projects.extend(document)
+                self.projects_sources.append(str(path))
+                self.project_editor.refresh()
+                if self.project_editor.table.currentRow() < 0 and self.project_editor.projects:
+                    self.project_editor.table.setCurrentCell(0, 0)
+                self.people_editor.refresh()
+                self.set_projects_dirty(not pristine)
             else:
-                self.warn(f'{KINDS[kind]} 파일 열기 실패', f'{path}\n{exc}')
+                year = document.year.strip()
+                if not year:
+                    errors.append(f'{Path(path).name}: 연도가 비어 있습니다.')
+                    continue
+                document.year = year
+                existing = self.people_docs.get(year)
+                # 내용이 있는 연도에 덧붙일 때만 합치기로 보고, 비어 있는 문서에 넣으면 채우기로 본다.
+                merge = (existing is not None
+                         and (existing.people or self.people_dirty.get(year) or self.people_sources.get(year)))
+                if merge:
+                    dupes = sorted({p.name for p in document.people} & {p.name for p in existing.people})
+                    if dupes:
+                        errors.append(f'{Path(path).name}: 이미 열린 {year}년 사람 이름과 겹칩니다: '
+                                      + ', '.join(dupes[:5]) + (' 외' if len(dupes) > 5 else ''))
+                        continue
+                    existing.people.extend(document.people)
+                    self.people_sources[year].append(str(path))
+                    self.set_people_dirty(year, True)
+                    if year == self.current_year:
+                        self.people_editor.refresh()
+                else:
+                    self.people_docs[year] = document
+                    self.people_dirty[year] = False
+                    self.people_sources[year] = [str(path)]
+                    self.select_year(year)
+                imported_people.append(str(path))
+            self.loaded_files.append(str(path))
+            self.settings.setValue('loaded_files', self.loaded_files)
+        if imported_people and not self.project_editor.projects and not self.projects_dirty:
+            # 사업 입력이 비어 있을 때만 사람 파일 옆의 사업 파일을 자동으로 가져온다.
+            found = find_projects_file(imported_people[0])
+            if found and found not in [str(p) for p in paths]:
+                sub_errors, sub_dropped = self.import_files([found])
+                errors.extend(sub_errors)
+                dropped.extend(sub_dropped)
+        if not errors:
+            self.statusBar().showMessage('불러오기: ' + ', '.join(Path(p).name for p in paths))
+        return errors, dropped
+
+    def select_year(self, year):
+        """고른 연도 문서를 편집기에 올린다. 사업 연도 표도 그 연도 기준으로 옮긴다."""
+        self.current_year = year
+        self.people_editor.blockSignals(True)
+        self.people_editor.set_doc(self.people_docs[year])
+        self.people_editor.blockSignals(False)
+        self.project_editor.reset_years()
+        self.refresh_marks()
+        self.settings.setValue('current_year', year)
+
+    def year_combo_changed(self, index):
+        year = self.year_combo.itemData(index)
+        if year is not None and year != self.current_year:
+            self.select_year(year)
+
+    def flush_year_edit(self):
+        """연도 입력칸의 타이핑을 확정한다. 계산·내보내기를 진행해도 되면 True."""
+        typed = self.people_editor.doc.year.strip()
+        if typed == self.current_year:
+            return True
+        if not valid_year(typed):
+            self.warn('연도 입력', '4자리 연도를 입력하세요 (예: 2026).')
             return False
-        if kind == 'projects':
-            self.project_editor.set_projects(document)
-            self.people_editor.refresh()
-        else:
-            self.people_editor.set_doc(document)
-            self.project_editor.reset_years()  # 연도 표를 새 관리 연도 기준 범위로 옮긴다.
-        self.edits[kind].setText(str(path))
-        self.backed_up.discard(str(Path(path).resolve()))
-        self.set_dirty(kind, False)
-        self.settings.setValue(f'{kind}_file', str(path))
-        self.statusBar().showMessage(f'{KINDS[kind]} 파일 열기: {path}')
-        if dropped and not quiet:
-            self.warn('지원하지 않는 항목', '표 편집기에서 다루지 않는 다음 항목은 저장할 때 빠집니다.\n'
-                      + '\n'.join(dropped[:20]) + ('\n...' if len(dropped) > 20 else ''))
+        if typed in self.people_docs:
+            self.warn('연도 입력', f'{typed}년 입력이 이미 열려 있습니다.')
+            return False
+        self.people_docs[typed] = self.people_docs.pop(self.current_year)
+        self.people_dirty[typed] = self.people_dirty.pop(self.current_year)
+        self.people_sources[typed] = self.people_sources.pop(self.current_year)
+        self.people_editor.doc.year = typed
+        self.current_year = typed
+        self.refresh_year_combo()
         return True
 
-    def new_document(self, kind):
-        if not self.keep_changes(kind):
+    def add_year(self):
+        year = (self.ask_year() or '').strip()
+        if not year:
             return
-        if kind == 'projects':
-            self.project_editor.set_projects([])
-            self.people_editor.refresh()
-            self.auto_projects = None
-        else:
-            self.people_editor.set_doc(PeopleDoc())
-            self.project_editor.reset_years()
-        self.edits[kind].setText('')
-        self.set_dirty(kind, False)
+        if not valid_year(year):
+            self.warn('연도 추가', f'4자리 연도를 입력하세요 (예: 2026). 입력: {year}')
+            return
+        if year in self.people_docs:
+            self.select_year(year)
+            self.statusBar().showMessage(f'이미 열린 연도입니다: {year}')
+            return
+        self.people_docs[year] = PeopleDoc(year, [])
+        self.people_dirty[year] = False
+        self.people_sources[year] = []
+        self.select_year(year)
+        self.statusBar().showMessage(f'연도 추가: {year}')
+
+    def close_year(self, year=None):
+        year = year or self.current_year
+        if len(self.people_docs) <= 1:
+            self.statusBar().showMessage('연도 문서는 최소 하나 있어야 합니다.')
+            return
+        if not self.keep_year(year):
+            return
+        years = sorted(self.people_docs)
+        rest = [y for y in years if y != year]
+        closed_sources = self.people_sources.pop(year, [])
+        del self.people_docs[year]
+        del self.people_dirty[year]
+        self.loaded_files = [p for p in self.loaded_files if p not in closed_sources]
+        self.settings.setValue('loaded_files', self.loaded_files)
+        self.select_year(rest[min(years.index(year), len(rest) - 1)])
+        self.statusBar().showMessage(f'연도 닫기: {year}')
+
+    def new_all(self):
+        """미반영 변경을 처리한 뒤 사업·사람 전체를 비우고 올해 빈 연도로 시작한다."""
+        if not self.keep_all():
+            return
+        self.project_editor.set_projects([])
+        today = PeopleDoc().year
+        self.people_docs = {today: PeopleDoc()}
+        self.people_dirty = {today: False}
+        self.people_sources = {today: []}
+        self.projects_sources = []
+        self.loaded_files = []
+        self.settings.setValue('loaded_files', [])
+        self.set_projects_dirty(False)
+        self.current_year = None
+        self.select_year(today)
         self.show_page(self.INPUT_PAGE)
-        self.input_tabs.setCurrentIndex(self.PROJECTS_TAB if kind == 'projects' else self.PEOPLE_TAB)
+        self.statusBar().showMessage('새로 만들기: 빈 입력으로 시작합니다.')
 
-    def text(self, kind):
-        if kind == 'projects':
-            return dump_projects(self.project_editor.projects)
-        return dump_people(self.people_editor.doc)
-
-    def save(self, kind, path=None):
-        """저장했으면 True. 경로가 없으면 저장 위치를 묻는다. 덮어쓰기 전 원본을 .bak으로 남긴다."""
-        path = path or self.edits[kind].text() or self.ask_save_path(kind)
-        if not path:
+    def browse_export(self):
+        folder = self.ask_export_folder()
+        if not folder:
             return False
-        target = Path(path)
+        return self.export_all(folder)
+
+    def export_all(self, folder):
+        """폴더에 projects.yaml과 연도별 사람 파일을 쓴다. 전부 성공하면 True."""
+        if not self.flush_year_edit():
+            return False
+        target = Path(folder)
+        jobs = [(target / 'projects.yaml', dump_projects(self.project_editor.projects))]
+        for year in sorted(self.people_docs):
+            jobs.append((target / 'people' / f'people_{year}.yaml', dump_people(self.people_docs[year])))
         try:
-            key = str(target.resolve())
-            if target.exists() and key not in self.backed_up:
-                shutil.copy2(target, target.with_name(target.name + '.bak'))
-                self.backed_up.add(key)
-            target.write_text(self.text(kind), encoding='utf-8')
+            (target / 'people').mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            self.warn(f'{KINDS[kind]} 파일 저장 실패', f'{path}\n{exc.strerror or exc}')
+            self.warn('내보내기 실패', f'{target / "people"}\n{exc.strerror or exc}')
             return False
-        self.edits[kind].setText(str(path))
-        self.set_dirty(kind, False)
-        self.settings.setValue(f'{kind}_file', str(path))
-        self.statusBar().showMessage(f'{KINDS[kind]} 파일 저장: {path}')
+        errors = []
+        for path, text in jobs:
+            try:
+                key = str(path.resolve())
+                if path.exists() and key not in self.backed_up:
+                    shutil.copy2(path, path.with_name(path.name + '.bak'))
+                    self.backed_up.add(key)
+                path.write_text(text, encoding='utf-8')
+            except OSError as exc:
+                errors.append(f'{path.name}: {exc.strerror or exc}')
+        if errors:
+            self.warn('내보내기 실패', '다음 파일은 쓰지 못했습니다:\n' + '\n'.join(errors))
+            return False
+        self.set_projects_dirty(False)
+        for year in self.people_dirty:
+            self.set_people_dirty(year, False)
+        self.settings.setValue('export_folder', str(folder))
+        self.statusBar().showMessage(f'내보내기: {folder} (사업 1개 · 사람 {len(jobs) - 1}개 연도)')
         return True
 
-    def save_as(self, kind):
-        path = self.ask_save_path(kind)
-        return bool(path) and self.save(kind, path)
+    def restore_or_default(self):
+        """지난번에 불러온 파일들을 다시 연다. 열린 연도가 없으면 올해 빈 연도로 시작한다."""
+        stored = self.settings.value('loaded_files', None)
+        if stored is None:
+            stored = []
+            for kind in KINDS:
+                old = self.settings.value(f'{kind}_file', '', type=str)
+                if old and Path(old).is_file():
+                    stored.append(old)
+            self.settings.remove('projects_file')
+            self.settings.remove('people_file')
+        if stored:
+            # 없어진 파일은 조용히 건너뛴다.
+            self.run_import([p for p in stored if Path(p).is_file()])
+        if not self.people_docs:
+            today = PeopleDoc().year
+            self.people_docs[today] = PeopleDoc()
+            self.people_dirty[today] = False
+            self.people_sources[today] = []
+        wanted = self.settings.value('current_year', '', type=str)
+        self.select_year(wanted if wanted in self.people_docs else sorted(self.people_docs)[0])
 
-    def save_all(self):
-        return all(self.save(kind) for kind in KINDS if self.dirty[kind])
+    def source_labels(self):
+        """계산에 쓴 파일 표시 이름. 합친 파일은 쉼표로 잇는다."""
+        projects = ', '.join(sorted(Path(p).name for p in self.projects_sources)) or '(새 사업 입력)'
+        sources = self.people_sources.get(self.current_year, [])
+        people = ', '.join(sorted(Path(p).name for p in sources)) or f'(새 {self.current_year} 입력)'
+        return projects, people
 
     def closeEvent(self, event):
-        if all(self.keep_changes(kind) for kind in KINDS):
+        if self.keep_all():
             event.accept()
         else:
             event.ignore()
@@ -542,8 +762,11 @@ class MainWindow(QMainWindow):
         self.project_list.clear()
 
     def generate(self):
-        """입력 화면의 현재 내용(저장 전이어도)을 파일과 같은 규칙으로 검증·계산해 결과 화면에 보여 준다."""
-        labels = tuple(self.edits[kind].text() or f'(새 {KINDS[kind]} 파일)' for kind in KINDS)
+        """입력 화면의 현재 내용(내보내기 전이어도)을 파일과 같은 규칙으로 검증·계산해 결과 화면에 보여 준다."""
+        if not self.flush_year_edit():
+            self.show_page(self.INPUT_PAGE)
+            return
+        labels = self.source_labels()
         self.result, self.issues, self.generated_at = None, [], None
         self.excel_button.setEnabled(False)
         self.clear_results()
@@ -552,7 +775,9 @@ class MainWindow(QMainWindow):
         self.nav_buttons[self.RESULT_PAGE].setChecked(True)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            inputs, issues = load_inputs(*labels, texts={kind: self.text(kind) for kind in KINDS})
+            inputs, issues = load_inputs(
+                *labels, texts={'projects': dump_projects(self.project_editor.projects),
+                                'people': dump_people(self.people_editor.doc)})
             result = calculate(inputs, issues) if inputs is not None else None
         except Exception as exc:  # 예상하지 못한 실패도 창을 닫지 않고 알린다.
             self.show_result_header()

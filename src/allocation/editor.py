@@ -941,19 +941,24 @@ class PeopleEditor(QWidget):
 
     # --- 사업 입력과의 연결 ---
 
-    def count_alias(self, alias):
-        return sum(1 for person in self.doc.people if person.allocations.get(alias, '').strip())
+    def count_alias(self, alias, doc=None):
+        target = self.doc if doc is None else doc
+        return sum(1 for person in target.people if person.allocations.get(alias, '').strip())
 
-    def rename_alias(self, old, new):
-        for person in self.doc.people:
+    def rename_alias(self, old, new, doc=None):
+        target = self.doc if doc is None else doc
+        for person in target.people:
             if old in person.allocations and not person.allocations.get(new):
                 person.allocations = rename_key({k: v for k, v in person.allocations.items() if k != new}, old, new)
-        self.refresh()
+        if target is self.doc:
+            self.refresh()
 
-    def remove_alias(self, alias):
-        for person in self.doc.people:
+    def remove_alias(self, alias, doc=None):
+        target = self.doc if doc is None else doc
+        for person in target.people:
             person.allocations.pop(alias, None)
-        self.refresh()
+        if target is self.doc:
+            self.refresh()
 
     # --- 휴직 ---
 
