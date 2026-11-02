@@ -4,7 +4,7 @@ from datetime import date
 from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSplitter, QStyle,
+                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -210,15 +210,16 @@ def theme_color(key):
 class ProjectEditor(QWidget):
     """좌측 사업 목록(사업명·약칭·기간·총 배정)과 우측 사업 × 연도 배정인력 표.
 
-    두 표는 행 순서·행 높이·세로 스크롤·현재 행이 맞물린다. 우측은 연속한 5개 연도와, 현재 칸의
-    연도를 따르는 맨 오른쪽 `YYYY 제외월` 열로 이루어진다.
+    두 표는 행 순서·행 높이·세로 스크롤·현재 행이 맞물린다. 우측은 연속한 6개 연도와, 현재 칸의
+    연도를 따르는 맨 오른쪽 `YYYY 제외월` 열로 이루어진다. 아래 가로 스크롤바로 연도 창을 옮긴다.
     """
 
     changed = Signal()
     alias_renamed = Signal(str, str)
     alias_removed = Signal(str)
     NAME, ALIAS, START, END, TOTAL = range(5)
-    YEARS = 5
+    YEARS = 6
+    EXCLUDED_WIDE = 1.4  # 제외월 열 너비(연도 열의 1.4배). 연도 열은 등간격이다.
 
     def __init__(self):
         super().__init__()
@@ -226,12 +227,14 @@ class ProjectEditor(QWidget):
         self.managed_year = lambda: str(date.today().year)  # 관리 연도. 메인 창이 사람 입력과 연결한다.
         self.allow_remove = lambda project: True
         self.year_start = self.base_year()
-        self.excluded_year = self.year_start + 1
+        self.excluded_year = self.year_start + 2
         self.table = EditTable(['사업명', '약칭', '시작일', '종료일', '총 배정'], row_band=True)
         self.table.set_date_columns(self.START, self.END)
         self.table.horizontalHeader().setSectionResizeMode(self.NAME, QHeaderView.Stretch)
         self.grid = EditTable([''] * (self.YEARS + 1), row_band=True)
         self.grid.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.grid.horizontalHeader().setSectionResizeMode(self.YEARS, QHeaderView.Fixed)
+        self.grid.viewport().installEventFilter(self)
         self.grid.setToolTip('칸에는 배정인력, 맨 오른쪽 칸에는 선택한 연도의 제외 월을 쉼표로 구분해 입력합니다 '
                              '(예: 3,4,5).')
         # 두 표의 보이는 높이를 같게 두어 줄이 맞게 한다. 세로 스크롤바는 우측에만 둔다.
@@ -258,9 +261,21 @@ class ProjectEditor(QWidget):
         title.addStretch()
         title.addWidget(self.notice)
         title.addWidget(QLabel('연도별 배정인력'))
-        title.addWidget(self.prev_button)
         title.addWidget(self.range_label)
-        title.addWidget(self.next_button)
+        self.year_scroll = QScrollBar(Qt.Horizontal)
+        self.year_scroll.setSingleStep(1)
+        self.year_scroll.setPageStep(self.YEARS)
+        self.year_scroll.valueChanged.connect(self.set_year_start)
+        self.scroll_box = QWidget()
+        scroll_row = QHBoxLayout(self.scroll_box)
+        scroll_row.setContentsMargins(0, 0, 0, 0)
+        scroll_row.addWidget(self.prev_button)
+        scroll_row.addWidget(self.year_scroll, 1)
+        scroll_row.addWidget(self.next_button)
+        self.scroll_box.installEventFilter(self)
+        # 좌우 표 높이를 같게 두어야 세로 스크롤 값 1:1 맞물림이 어긋나지 않는다.
+        self.scroll_filler = QWidget()
+        self.scroll_filler.setFixedHeight(self.scroll_box.sizeHint().height())
 
         self.add_button, self.remove_button = QPushButton('사업 추가'), QPushButton('사업 삭제')
         self.add_button.clicked.connect(self.add_project)
@@ -273,9 +288,19 @@ class ProjectEditor(QWidget):
             self.legends.append((chip, key, text))
             bottom.addWidget(chip)
 
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self.table, 1)
+        left_layout.addWidget(self.scroll_filler)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(self.grid, 1)
+        right_layout.addWidget(self.scroll_box)
         self.split = QSplitter(Qt.Horizontal)
-        self.split.addWidget(self.table)
-        self.split.addWidget(self.grid)
+        self.split.addWidget(left)
+        self.split.addWidget(right)
         self.split.setSizes([620, 620])
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -287,31 +312,49 @@ class ProjectEditor(QWidget):
     # --- 연도 범위 ---
 
     def base_year(self):
+        # 처음 창은 관리 연도가 왼쪽에서 세 번째(짝수 6열의 중앙 앞쪽)에 오도록 둔다.
         year = self.managed_year()
-        return (int(year) if valid_year(year) else date.today().year) - 1
+        return (int(year) if valid_year(year) else date.today().year) - 2
 
     def years_shown(self):
         return [self.year_start + offset for offset in range(self.YEARS)]
 
     def reset_years(self):
-        """처음 범위(관리 연도 - 1부터 5년)로 돌리고 제외월 열은 관리 연도로 둔다."""
+        """처음 범위(관리 연도 - 2부터 6년)로 돌리고 제외월 열은 관리 연도로 둔다."""
         self.year_start = self.base_year()
-        self.excluded_year = self.year_start + 1
+        self.excluded_year = self.year_start + 2
         self.refresh_grid()
 
-    def shift_years(self, step):
-        self.year_start += step
+    def set_year_start(self, start):
+        step = 1 if start >= self.year_start else -1
+        self.year_start = start
         shown = self.years_shown()
         if self.excluded_year not in shown:
             self.excluded_year = shown[0] if step > 0 else shown[-1]
         self.refresh_grid()
+
+    def shift_years(self, step):
+        self.set_year_start(self.year_start + step)
+
+    def update_year_scroll(self):
+        """스크롤 범위는 배정 연도 구간과 현재 창을 함께 덮는다. 버튼으로 벗어나면 범위가 늘어난다."""
+        span = [int(e.year) for project in self.projects for e in project.years if valid_year(e.year)]
+        low = min(span + [self.year_start])
+        high = max([s - self.YEARS + 1 for s in span] + [self.year_start])
+        bar = self.year_scroll
+        bar.blockSignals(True)
+        bar.setMinimum(low)
+        bar.setMaximum(high)
+        bar.setValue(self.year_start)
+        bar.setEnabled(low != high)
+        bar.blockSignals(False)
 
     # --- 데이터 ---
 
     def set_projects(self, projects):
         self.projects = projects
         self.year_start = self.base_year()
-        self.excluded_year = self.year_start + 1
+        self.excluded_year = self.year_start + 2
         self.refresh()
         if projects:
             self.table.setCurrentCell(0, 0)
@@ -412,12 +455,6 @@ class ProjectEditor(QWidget):
             font = QFont(grid.font())
             font.setBold(year == managed)
             header.setFont(font)
-            # 제외월 열이 가리키는 연도와 제외월 열 머리글을 같은 색으로 강조한다.
-            # 나머지는 기본 글자색(시스템 테마)을 쓴다. 검은색을 고정하면 다크에서 안 보인다.
-            if year == self.excluded_year:
-                header.setForeground(theme.current_cell_color())
-            else:
-                header.setForeground(QBrush())
             header.setToolTip('관리 연도' if year == managed and column < self.YEARS else '')
         hidden = [0, 0]
         unshown = 0
@@ -436,7 +473,7 @@ class ProjectEditor(QWidget):
                 entry = self.entry(project, year)
                 notes, base = [], None
                 if start and end and not start.year <= year <= end.year:
-                    notes.append('사업 기간 밖 연도입니다 (생성하면 경고).')
+                    notes.append('사업 기간 밖 연도입니다 (계산하면 경고).')
                     base = theme.outside_color()
                 if entry and entry.excluded.strip():
                     notes.append(f'제외 월: {entry.excluded}')
@@ -451,15 +488,32 @@ class ProjectEditor(QWidget):
             else:
                 grid.set_cell(row, self.YEARS, entry.excluded, problem=problems.get((index[id(entry)], 2), ''))
         grid.blockSignals(False)
-        self.prev_button.setText('◀' + (f' {hidden[0]}' if hidden[0] else ''))
-        self.next_button.setText((f'{hidden[1]} ' if hidden[1] else '') + '▶')
+        self.prev_button.setText('◀')
+        self.next_button.setText('▶')
         self.prev_button.setToolTip(f'이전 해로 이동 (앞쪽에 값이 있는 연도 {hidden[0]}건)' if hidden[0]
                                     else '이전 해로 이동')
         self.next_button.setToolTip(f'다음 해로 이동 (뒤쪽에 값이 있는 연도 {hidden[1]}건)' if hidden[1]
                                     else '다음 해로 이동')
         self.range_label.setText(f'{shown[0]} ~ {shown[-1]}')
-        self.notice.setText(f'표시할 수 없는 연도 항목 {unshown}건 (생성하면 오류로 표시)' if unshown else '')
+        self.notice.setText(f'표시할 수 없는 연도 항목 {unshown}건 (계산하면 오류로 표시)' if unshown else '')
+        self.update_year_scroll()
+        self.fit_excluded_column()
         self.sync_headers()
+
+    def fit_excluded_column(self):
+        """제외월 열 너비를 연도 열의 1.4배로 둔다. 연도 열은 stretch로 등간격을 유지한다."""
+        width = self.grid.viewport().width()
+        if width > 0:
+            share = self.EXCLUDED_WIDE / (self.YEARS + self.EXCLUDED_WIDE)
+            self.grid.setColumnWidth(self.YEARS, round(width * share))
+
+    def eventFilter(self, watched, event):
+        # 표 본체가 바뀌는 시점에는 viewport 너비가 아직 예전 값이라 viewport를 직접 본다.
+        if watched is self.grid.viewport() and event.type() == QEvent.Resize:
+            self.fit_excluded_column()
+        elif watched is self.scroll_box and event.type() == QEvent.Resize:
+            self.scroll_filler.setFixedHeight(self.scroll_box.height())
+        return super().eventFilter(watched, event)
         self.align_current()
 
     def align_current(self):
@@ -625,7 +679,7 @@ class PeopleEditor(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(year_row)
-        layout.addWidget(split)
+        layout.addWidget(split, 1)  # 남는 높이를 표 영역이 가져가야 연도 줄이 늘어나지 않는다.
         self.overview = PeopleOverview(self)
         self.refresh()
 
@@ -803,7 +857,7 @@ class PeopleEditor(QWidget):
             if key not in known:
                 return '사업 목록에 없는 약칭입니다. 사업 입력 탭에서 추가하거나 행을 지우세요.'
             if key not in available:
-                return f'{self.doc.year} 배정이 없거나 사업 기간이 아닌 사업입니다 (생성하면 오류).'
+                return f'{self.doc.year} 배정이 없거나 사업 기간이 아닌 사업입니다 (계산하면 오류).'
         return ''
 
     def show_person(self):

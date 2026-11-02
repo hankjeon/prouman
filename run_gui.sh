@@ -23,4 +23,8 @@ if [[ ! -x "$venv_dir/bin/python" ]]; then
     exit 1
 fi
 
+# Wayland에서 Qt가 포커스가 바뀔 때마다 찍는 텍스트 입력 경고(무해한 내부 메시지)를 끈다.
+# 사용자가 정한 규칙이 있으면 뒤에 붙여 우선한다.
+export QT_LOGGING_RULES="qt.qpa.wayland.textinput=false${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+
 exec "$venv_dir/bin/python" "$script_dir/src/gui.py"

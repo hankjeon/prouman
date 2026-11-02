@@ -131,15 +131,6 @@ def nav_stylesheet():
             f'QToolButton:hover:!checked {{ background-color: {hover}; }}')
 
 
-def stale_stylesheet():
-    """'입력이 바뀌었습니다' 알림 줄. 글자색을 함께 지정해야 다크에서도 보인다."""
-    if is_dark():
-        return ('QFrame { background-color: #4a3f1e; border: 1px solid #8a7638; }'
-                'QLabel { border: none; color: #ffe9a8; }')
-    return ('QFrame { background-color: #fff4c2; border: 1px solid #e0c060; }'
-            'QLabel { border: none; color: #5a4a00; }')
-
-
 def legend_stylesheet(color):
     """범례 칩. 칩 밝기에 맞는 글자색을 함께 지정한다."""
     ink = '#000000' if color.lightness() >= 128 else '#ffffff'

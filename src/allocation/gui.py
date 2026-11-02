@@ -1,10 +1,12 @@
 """PySide6 데스크톱 화면. 사업·사람 입력을 표로 편집하고, 계산 결과를 그리드로 보여 준다."""
+import os
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt
+from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt,
+                            qInstallMessageHandler)
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
@@ -132,7 +134,9 @@ def find_projects_file(people_path):
 
 
 class MainWindow(QMainWindow):
-    """왼쪽 메뉴로 입력 화면(파일·표 편집)과 결과 화면(생성 결과·엑셀 저장)을 바꾼다."""
+    """왼쪽 메뉴로 입력 화면(파일·표 편집)과 결과 화면(계산 결과·엑셀 저장)을 바꾼다.
+
+    결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
 
     INPUT_PAGE, RESULT_PAGE = 0, 1
     PROJECTS_TAB, PEOPLE_TAB, OVERVIEW_TAB = 0, 1, 2  # input_tabs
@@ -143,15 +147,15 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings('prouman', 'prouman')
         self.result = None
         self.issues = []
-        self.generated_at = None  # 마지막 생성 시각. 이후 입력이 바뀌면 결과 화면에 다시 생성 안내를 띄운다.
-        self.generated_from = ()  # 생성할 때의 사업·사람 파일 표시 이름
+        self.generated_at = None  # 마지막 계산 시각. 결과 화면을 열 때마다 새로 계산한다.
+        self.generated_from = ()  # 계산할 때의 사업·사람 파일 표시 이름
         self.auto_projects = None
         self.dirty = {'projects': False, 'people': False}
         self.backed_up = set()  # 이번 실행에서 .bak을 만든 파일. 첫 저장 직전의 원본만 백업한다.
         self.setWindowTitle('인력 배분')
         self.resize(1280, 800)
 
-        # 입력 화면: 파일 줄, 생성 버튼, 사업·사람 입력 탭
+        # 입력 화면: 파일 줄, 사업·사람 입력 탭
         self.projects_edit, self.people_edit = QLineEdit(), QLineEdit()
         self.edits = {'projects': self.projects_edit, 'people': self.people_edit}
         files = QGridLayout()
@@ -169,15 +173,6 @@ class MainWindow(QMainWindow):
                 button = QPushButton(text)
                 button.clicked.connect(slot)
                 files.addWidget(button, row, column)
-        self.generate_button = QPushButton('생성 ▶')
-        self.generate_button.setToolTip('입력 화면의 현재 내용으로 계산합니다. 저장하지 않아도 됩니다.')
-        self.generate_button.setStyleSheet('QPushButton { font-weight: bold; padding: 6px 24px; }')
-        self.generate_button.clicked.connect(self.generate)
-        generate_row = QHBoxLayout()
-        generate_row.addWidget(QLabel('입력을 마치면 생성을 누르세요. 저장하지 않아도 현재 내용으로 계산합니다.'))
-        generate_row.addStretch()
-        generate_row.addWidget(self.generate_button)
-
         self.project_editor = ProjectEditor()
         self.people_editor = PeopleEditor(lambda: self.project_editor.projects)
         self.project_editor.managed_year = lambda: self.people_editor.doc.year
@@ -195,10 +190,9 @@ class MainWindow(QMainWindow):
         input_page = QWidget()
         layout = QVBoxLayout(input_page)
         layout.addLayout(files)
-        layout.addLayout(generate_row)
         layout.addWidget(self.input_tabs)
 
-        # 결과 화면: 머리 줄(생성 정보·엑셀 저장), 다시 생성 안내, 결과 탭
+        # 결과 화면: 머리 줄(계산 정보·엑셀 저장), 결과 탭
         self.result_header = QLabel()
         self.excel_button = QPushButton('엑셀 저장')
         self.excel_button.clicked.connect(self.browse_excel)
@@ -206,16 +200,6 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         header.addWidget(self.result_header, 1)
         header.addWidget(self.excel_button)
-        self.stale_label = QLabel()
-        regenerate = QPushButton('다시 생성')
-        regenerate.clicked.connect(self.generate)
-        self.stale_bar = QFrame()
-        self.stale_bar.setStyleSheet(theme.stale_stylesheet())
-        stale = QHBoxLayout(self.stale_bar)
-        stale.setContentsMargins(8, 4, 8, 4)
-        stale.addWidget(self.stale_label, 1)
-        stale.addWidget(regenerate)
-        self.stale_bar.hide()
 
         self.issue_view = CopyTableView()
         self.people_summary_view, self.project_summary_view = CopyTableView(), CopyTableView()
@@ -254,16 +238,10 @@ class MainWindow(QMainWindow):
         for widget, title in ((self.issue_view, '검증'), (summary, '요약'), (people, '개인상세'),
                               (project_details, '사업상세')):
             self.result_tabs.addTab(widget, title)
-        placeholder = QLabel('아직 생성하지 않았습니다.\n입력 화면에서 [생성 ▶]을 누르세요.')
-        placeholder.setAlignment(Qt.AlignCenter)
-        self.result_stack = QStackedWidget()
-        self.result_stack.addWidget(placeholder)
-        self.result_stack.addWidget(self.result_tabs)
         result_page = QWidget()
         layout = QVBoxLayout(result_page)
         layout.addLayout(header)
-        layout.addWidget(self.stale_bar)
-        layout.addWidget(self.result_stack)
+        layout.addWidget(self.result_tabs)
 
         # 왼쪽 메뉴와 화면 전환
         self.pages = QStackedWidget()
@@ -373,6 +351,10 @@ class MainWindow(QMainWindow):
         self.people_editor.select_person(row)
 
     def show_page(self, page):
+        """결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
+        if page == self.RESULT_PAGE:
+            self.generate()
+            return
         self.pages.setCurrentIndex(page)
         self.nav_buttons[page].setChecked(True)
 
@@ -384,19 +366,11 @@ class MainWindow(QMainWindow):
         year = f'관리 연도 {self.result.inputs.year} · ' if self.result is not None else ''
         names = ' / '.join(label if label.startswith('(') else Path(label).name for label in self.generated_from)
         self.result_header.setText(f'{year}ERROR {errors}건 / WARNING {warnings}건 · '
-                                   f'{self.generated_at:%H:%M:%S} 생성 · {names}{extra}')
-
-    def mark_stale(self):
-        """생성한 뒤 입력이 바뀌면 결과가 예전 입력 기준임을 알린다."""
-        if self.generated_at is not None:
-            self.stale_label.setText(f'입력이 바뀌었습니다. 아래 결과는 {self.generated_at:%H:%M:%S}에 생성한 '
-                                     '입력 기준입니다.')
-            self.stale_bar.show()
+                                   f'{self.generated_at:%H:%M:%S} 계산 · {names}{extra}')
 
     def apply_theme_styles(self):
-        """시스템 테마가 바뀌면 메뉴·알림 줄·결과 표 색을 다시 칠한다."""
+        """시스템 테마가 바뀌면 메뉴·결과 표 색을 다시 칠한다."""
         self.nav.setStyleSheet(theme.nav_stylesheet())
-        self.stale_bar.setStyleSheet(theme.stale_stylesheet())
         self.project_editor.apply_theme()
         self.people_editor.apply_theme()
         fresh = severity_colors()
@@ -418,8 +392,6 @@ class MainWindow(QMainWindow):
         index = self.PROJECTS_TAB if kind == 'projects' else self.PEOPLE_TAB
         self.input_tabs.setTabText(index, f'{KINDS[kind]} 입력' + (' *' if dirty else ''))
         self.nav_buttons[self.INPUT_PAGE].setText('✎  입력' + (' *' if any(self.dirty.values()) else ''))
-        if dirty:
-            self.mark_stale()
 
     def projects_changed(self):
         self.set_dirty('projects', True)
@@ -499,7 +471,6 @@ class MainWindow(QMainWindow):
         self.edits[kind].setText(str(path))
         self.backed_up.discard(str(Path(path).resolve()))
         self.set_dirty(kind, False)
-        self.mark_stale()
         self.settings.setValue(f'{kind}_file', str(path))
         self.statusBar().showMessage(f'{KINDS[kind]} 파일 열기: {path}')
         if dropped and not quiet:
@@ -519,7 +490,6 @@ class MainWindow(QMainWindow):
             self.project_editor.reset_years()
         self.edits[kind].setText('')
         self.set_dirty(kind, False)
-        self.mark_stale()
         self.show_page(self.INPUT_PAGE)
         self.input_tabs.setCurrentIndex(self.PROJECTS_TAB if kind == 'projects' else self.PEOPLE_TAB)
 
@@ -572,14 +542,14 @@ class MainWindow(QMainWindow):
         self.project_list.clear()
 
     def generate(self):
-        """입력 화면의 현재 내용(저장 전이어도)을 파일과 같은 규칙으로 검증·계산하고 결과 화면으로 간다."""
+        """입력 화면의 현재 내용(저장 전이어도)을 파일과 같은 규칙으로 검증·계산해 결과 화면에 보여 준다."""
         labels = tuple(self.edits[kind].text() or f'(새 {KINDS[kind]} 파일)' for kind in KINDS)
         self.result, self.issues, self.generated_at = None, [], None
         self.excel_button.setEnabled(False)
         self.clear_results()
         self.issue_view.show_table([], [])
-        self.stale_bar.hide()
-        self.result_stack.setCurrentIndex(0)
+        self.pages.setCurrentIndex(self.RESULT_PAGE)
+        self.nav_buttons[self.RESULT_PAGE].setChecked(True)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             inputs, issues = load_inputs(*labels, texts={kind: self.text(kind) for kind in KINDS})
@@ -594,11 +564,9 @@ class MainWindow(QMainWindow):
 
         self.issues = result.issues if result is not None else issues
         self.generated_at, self.generated_from = datetime.now(), labels
-        self.result_stack.setCurrentIndex(1)
         self.issue_view.show_table(*issue_table(self.issues), colors=severity_colors())
-        self.show_page(self.RESULT_PAGE)
         if result is None or result.has_errors:
-            self.show_result_header(' · 오류로 결과를 만들지 않았습니다. 입력 화면에서 고친 뒤 다시 생성하세요.')
+            self.show_result_header(' · 오류로 결과를 만들지 않았습니다. 입력 화면에서 고친 뒤 결과 화면으로 돌아오세요.')
             self.result_tabs.setCurrentIndex(self.ISSUES_TAB)
             return
 
@@ -652,7 +620,34 @@ class MainWindow(QMainWindow):
         return True
 
 
+WAYLAND_NOISE = (
+    # Wayland는 팝업이 아닌 창의 마우스 grab을 지원하지 않는다. 열린 메뉴 제목을 다시 누르는 등
+    # Qt 내부 동작에도 경고를 찍지만 동작은 정상이므로, 정확히 이 줄만 버리고 나머지는 그대로 둔다.
+    'This plugin supports grabbing the mouse only for popup windows',
+)
+_previous_message_handler = None
+
+
+def _qt_message_handler(mode, context, message):
+    if message in WAYLAND_NOISE:
+        return
+    if _previous_message_handler is not None:
+        _previous_message_handler(mode, context, message)
+    else:
+        # 따로 건 핸들러가 없을 때가 Qt 기본 출력이다. PySide6는 기본 핸들러를
+        # 노출하지 않으므로 stderr에 직접 쓴다.
+        os.write(2, f'{message}\n'.encode('utf-8', 'replace'))
+
+
+def install_qt_noise_filter():
+    """알려진 Wayland 무해 경고를 버린다. 두 번 불러도 한 번만 건다."""
+    global _previous_message_handler
+    if _previous_message_handler is None:
+        _previous_message_handler = qInstallMessageHandler(_qt_message_handler)
+
+
 def main():
+    install_qt_noise_filter()
     app = QApplication.instance() or QApplication(sys.argv)
     window = MainWindow()
     window.show()
