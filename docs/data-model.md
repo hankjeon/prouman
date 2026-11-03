@@ -94,6 +94,8 @@ people:
 
 연간 할당량은 사람마다 한 번만 기재한다. 사람별 `yearly` 묶음, 월별 12개 숫자 배열, 인력 ID 참조는 앞선 제안에서 쓰였지만 1차 최종 입력 형식이 아니다. 공백 사유를 쓰지 않아도 동일하게 계산한다.
 
+> 후속 기능: 계획 파일의 `stage: planning`·`priorities`·`draft_allocations`와 확정 파일의 선택적 `stage: confirmed`는 [연간 인력 계획 명세](annual-planning.md)에 정의했다. **현재 로더는 이 필드를 지원하지 않는다.** 위의 `allocations` 형식은 지금 실행 가능한 확정 입력이다.
+
 ## 내부 계산 값
 
 `base[month]`: 월 기준 인력, `absence[person,month]`: 반올림한 월 공백 인력, `capacity = base - absence`, `target[person,project]`: 입력 연간 목표, `x[person,project,month]`: 출력 월별 할당. 출력 집계는 `x`의 합으로 계산하고 YAML에 중복 저장하지 않는다. 모든 값은 0.00001 단위의 비음수 값이다.
