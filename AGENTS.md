@@ -4,9 +4,9 @@
 
 ## 구현 범위와 읽기 순서
 
-코드 작성 전 `README.md` → `docs/requirements.md` → `docs/data-model.md` → `docs/allocation-algorithm.md` → `docs/validation.md` → `docs/test-cases.md` 순서로 읽는다. 과거 예시의 월별 직접 입력, 사업 기간 일수 비례 계산, 개인별 `yearly` 묶음, 사업 배정인력 완전 소진은 최종 규칙이 아니다.
+코드 작성 전 `README.md` → `docs/requirements.md` → `docs/data-model.md` → `docs/allocation-algorithm.md` → `docs/validation.md` → `docs/test-cases.md` 순서로 읽는다. 연간 인력 계획 기능을 다룰 때는 `docs/annual-planning.md`도 읽는다. 과거 예시의 월별 직접 입력, 사업 기간 일수 비례 계산, 개인별 `yearly` 묶음, 사업 배정인력 완전 소진은 최종 규칙이 아니다.
 
-1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. 엑셀(.xlsx) 저장(`--excel`)과 PySide6 데스크톱 GUI(`src/allocation/gui.py`)는 1차 범위다. GUI는 계산 엔진과 공용 표(`tables.py`)를 재사용하고 계산 규칙을 따로 두지 않는다. GUI 입력 편집기(`document.py`, `editor.py`)는 편집 내용을 YAML로 만들어 `load_inputs`로 검증하며, 입력 중 안내 외의 검증 규칙을 새로 만들지 않는다. 그래프, CSV 출력, exe 패키징 및 사업 우선순위 기반 연간 목표 자동 생성은 2차 이후다.
+1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. 엑셀(.xlsx) 저장(`--excel`)과 PySide6 데스크톱 GUI(`src/allocation/gui.py`)는 1차 범위다. GUI는 계산 엔진과 공용 표(`tables.py`)를 재사용하고 계산 규칙을 따로 두지 않는다. GUI 입력 편집기(`document.py`, `editor.py`)는 편집 내용을 YAML로 만들어 `load_inputs`로 검증하며, 입력 중 안내 외의 검증 규칙을 새로 만들지 않는다. 사업 우선순위 기반 연간 목표 자동 생성은 `docs/annual-planning.md`에 명세만 있으며 아직 구현되지 않았다. 그래프, CSV 출력, exe 패키징은 후속 범위다.
 
 ## 필수 구현 원칙
 
@@ -24,3 +24,9 @@
 첫 구현 작업에 앞서 문서 간 모순·불명확성 및 구현·테스트 계획을 보고한다. 사용자가 그 검토 결과를 보고 구현을 요청하면 코드를 작성한다.
 
 `docs/test-cases.md`의 정상·경고·오류 사례와 CLI 조회 옵션을 검증한다. 결과를 보고할 때 구현 파일, 실행 방법, 실행한 테스트와 결과, 검증하지 못한 경계를 구분한다. 문서와 구현 사이에 모순이 생기면 조용히 해석하지 말고 해당 규칙과 선택 이유를 문서에 반영한다.
+
+## 세션 기록
+
+작업 시작 시 저장소 루트의 `SESSION.md`에서 최신 관련 항목과 남은 일을 확인한다. 작업 종료 전 날짜·주제별 항목에 사용자와 합의한 결정, **실제로 한 일**, 실행한 검증과 결과, 검증하지 못한 경계, 다음 할 일과 막힌 이유를 남긴다. 계획·추정·테스트 예정만으로 완료 처리하지 않는다. 관련 명세가 바뀌면 해당 문서와 세션 기록을 함께 갱신한다. 과거 기능별 기록은 `docs/development-log.md`에 남겨 두고, 새 작업은 `SESSION.md`에 기록한다.
+
+**다음 작업 세션 시작 알림:** 다른 일을 시작하기 전에 사용자에게 연간 인력 계획 기능은 **구현 계획 문서만 완료했고 코드는 아직 구현하지 않았음**을 먼저 알린다. 구현 기준은 `docs/annual-planning.md`, 이어 할 일은 `SESSION.md`의 최신 항목에 있다. 사용자가 새 작업의 우선순위를 달리 지정하면 그 지시를 따른다.
