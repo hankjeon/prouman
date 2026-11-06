@@ -2,10 +2,11 @@ import calendar
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
-from .flow import transport
+from .flow import minimum_can_improve, transport
 from .models import Issue, Result, amount
 
 BASE = tuple(8334 if month % 3 == 0 else 8333 for month in range(1, 13))
+MONTHLY_MINIMUM = 10  # 0.00010 (5자리 단위 정수)
 
 
 def allowed_months(project, year):
@@ -89,7 +90,8 @@ def calculate(inputs, issues=()):
             continue  # 원인을 고친 뒤 나머지 사업의 배분 가능성을 다시 판정한다.
         if sum(person.targets.values()) != sum(capacities):
             continue  # 합계가 잘못된 입력의 배분 가능성 진단은 의미가 없다.
-        values, shortage, cut_projects, cut_months = transport(person.targets, allowed, capacities)
+        values, shortage, cut_projects, cut_months = transport(person.targets, allowed, capacities,
+                                                              minimum=MONTHLY_MINIMUM)
         if values is None:
             result.issues.append(Issue('ERROR', 'E201', f'{inputs.people_file}: {name} / {year}',
                 f'목표 {amount(sum(person.targets.values()))}, 부족 {amount(shortage)}; '
@@ -100,6 +102,18 @@ def calculate(inputs, issues=()):
             result.allocations[name] = values
     if not result.has_errors:
         result.issues.extend(validate_result(result))
+    if not result.has_errors:
+        for name, person in inputs.people.items():
+            for alias, target in person.targets.items():
+                if target == 0:
+                    continue
+                for month in sorted(allowed_months(inputs.projects[alias], year)):
+                    value = result.allocations[name][alias][month]
+                    if result.absence[name][month] < BASE[month] and value < MONTHLY_MINIMUM:
+                        result.issues.append(Issue('WARNING', 'W006',
+                            f'{inputs.people_file}: {name} / {alias} / {year}년 {month + 1}월',
+                            f'월 할당 {amount(value)}', f'가능하면 월 최소 {amount(MONTHLY_MINIMUM)}',
+                            '연간 목표와 월별 가용량을 유지하기 위해 이 월의 최소치를 완화했습니다.'))
     if result.has_errors:
         result.allocations.clear()
     return result
@@ -111,6 +125,7 @@ def validate_result(result):
     violations = []
     project_totals = {alias: 0 for alias in inputs.projects}
     for name, person in inputs.people.items():
+        prior_violations = len(violations)
         rows = result.allocations.get(name, {})
         absence = result.absence.get(name, [])
         if set(rows) != set(person.targets) or len(absence) != 12:
@@ -132,6 +147,10 @@ def validate_result(result):
         totals = [absence[m] + sum(row[m] for row in rows.values()) for m in range(12)]
         if tuple(totals) != BASE or any(sum(totals[q:q + 3]) != 25000 for q in (0, 3, 6, 9)) or sum(totals) != 100000:
             violations.append(f'{name}: 월·분기·연간 합계 불일치')
+        if len(violations) == prior_violations:
+            allowed = {alias: allowed_months(inputs.projects[alias], inputs.year) for alias in rows}
+            if minimum_can_improve(person.targets, allowed, rows, MONTHLY_MINIMUM):
+                violations.append(f'{name}: 월별 최소 배정 부족을 더 줄일 수 있음')
     for alias, total in project_totals.items():
         budget = inputs.projects[alias].yearly.get(inputs.year)
         if total > (budget.limit if budget else 0):
