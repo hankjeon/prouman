@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 from allocation.cli import main
 from allocation.engine import BASE, calculate, validate_result
 from allocation.excel import write_workbook
-from allocation.flow import transport
+from allocation.flow import minimum_can_improve, transport
 from allocation.loading import load_inputs
 from allocation.models import amount
 from allocation.rendering import issue_sort_key, person_summary, person_table, project_summary, render_result
@@ -110,12 +110,89 @@ class AcceptanceTests(unittest.TestCase):
     def test_T03_excluded_quarter(self):
         r = self.ok([project(excluded=[4, 5, 6]), project('사업2')],
                     [person({'사업1': '0.60000', '사업2': '0.40000'})])
-        self.assertEqual(r.allocations['홍길동']['사업1'], [6667] * 3 + [0] * 3 + [6667] * 3 + [6666] * 3)
+        self.assertEqual(r.allocations['홍길동']['사업1'],
+                         [6667, 6667, 6667, 0, 0, 0, 6667, 6666, 6667, 6666, 6666, 6667])
+
+    def test_equal_annual_targets_use_only_nearest_monthly_values(self):
+        r = self.ok([project('A'), project('B')], [person({'A': '0.50000', 'B': '0.50000'})])
+        for row in r.allocations['홍길동'].values():
+            self.assertEqual(sum(row), 50000)
+            self.assertEqual(set(row), {4166, 4167})
+            self.assertTrue(all(row[month - 1] == 4167 for month in (3, 6, 9, 12)))
+        self.assertEqual([sum(r.allocations['홍길동'][alias][month] for alias in ('A', 'B'))
+                          for month in range(12)], list(BASE))
+
+    def test_myteam_balance_reduces_unnecessary_minimum_cells(self):
+        folder = ROOT / 'myteam'
+        inputs, issues = load_inputs(str(folder / 'projects.yaml'),
+                                    str(folder / 'people' / 'people_2026.yaml'))
+        self.assertIsNotNone(inputs, issues)
+        result = calculate(inputs, issues)
+        self.assertFalse(result.has_errors, result.issues)
+        minimum_cells = sum(value == 10 for name, rows in result.allocations.items()
+                            for alias, row in rows.items() if inputs.people[name].targets[alias] > 0
+                            for value in row)
+        self.assertLess(minimum_cells, 21)  # 종전 엔진의 최저값 21칸
 
     def test_T04_partial_months(self):
         r = self.ok([project(period='2027-04-15~2027-09-10'), project('사업2')],
                     [person({'사업1': '0.50000', '사업2': '0.50000'})])
         self.assertEqual(r.allocations['홍길동']['사업1'], [0] * 3 + list(BASE[3:9]) + [0] * 3)
+
+    def minimum_regression_case(self):
+        allowed = {'A': {2, 6, 8, 10}, 'B': {1, 3, 5, 6, 7, 8, 9, 10, 11, 12},
+                   '연중': set(range(1, 13))}
+        projects = [project(alias, excluded=sorted(set(range(1, 13)) - months))
+                    for alias, months in allowed.items()]
+        result = self.ok(projects, [person({'A': '0.08000', 'B': '0.71000', '연중': '0.21000'})])
+        return result, {alias: {m - 1 for m in months} for alias, months in allowed.items()}
+
+    def test_monthly_minimum_prevents_avoidable_zero(self):
+        r, allowed = self.minimum_regression_case()
+        for alias, row in r.allocations['홍길동'].items():
+            for month, value in enumerate(row):
+                if month in allowed[alias]:
+                    self.assertGreaterEqual(value, 10)
+                else:
+                    self.assertEqual(value, 0)
+        self.assertNotIn('W006', [i.code for i in r.issues])
+
+    def test_monthly_minimum_relaxes_only_forced_month(self):
+        r = self.ok([project('기간', period='2027-01-01~2027-01-31'), project('연중')],
+                    [person({'기간': '0.08333', '연중': '0.91667'})])
+        self.assertEqual(r.allocations['홍길동']['연중'], [0] + list(BASE[1:]))
+        warnings = [i for i in r.issues if i.code == 'W006']
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('연중 / 2027년 1월', warnings[0].location)
+        self.assertIn('0.00000', warnings[0].current)
+
+    def test_monthly_minimum_keeps_feasible_subminimum_value(self):
+        r = self.ok([project('기간', period='2027-01-01~2027-01-31'), project('연중')],
+                    [person({'기간': '0.08328', '연중': '0.91672'})])
+        self.assertEqual(r.allocations['홍길동']['연중'], [5] + list(BASE[1:]))
+        warnings = [i for i in r.issues if i.code == 'W006']
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('0.00005', warnings[0].current)
+
+    def test_small_annual_target_uses_best_effort_without_changing_total(self):
+        r = self.ok([project('A'), project('B')], [person({'A': '0.00060', 'B': '0.99940'})])
+        self.assertEqual(r.allocations['홍길동']['A'], [5] * 12)
+        self.assertEqual(len([i for i in r.issues if i.code == 'W006']), 12)
+        r = self.ok([project('A'), project('B')], [person({'A': '0.00001', 'B': '0.99999'})])
+        self.assertEqual(r.allocations['홍길동']['A'], [0, 0, 1] + [0] * 9)
+
+    def test_monthly_minimum_exempts_full_absence_and_zero_targets(self):
+        r = self.ok([project('A'), project('B')],
+                    [person({'A': '0.75000', 'B': '0.00000'}, absences=['2027-07-01~2027-09-30'])])
+        self.assertEqual(r.allocations['홍길동']['B'], [0] * 12)
+        self.assertEqual(r.allocations['홍길동']['A'][6:9], [0] * 3)
+        self.assertNotIn('W006', [i.code for i in r.issues])
+
+    def test_post_validation_rejects_avoidable_minimum_shortfall(self):
+        r, allowed = self.minimum_regression_case()
+        old, _, _, _ = transport(r.inputs.people['홍길동'].targets, allowed, BASE)
+        r.allocations['홍길동'] = old
+        self.assertTrue(any(i.code == 'E301' and '최소' in i.location for i in validate_result(r)))
 
     def test_T05_partial_absence(self):
         r = self.ok(people=[person({'사업1': '0.95430'}, absences=['2026-07-15~2026-07-31'])],
@@ -743,6 +820,67 @@ class AcceptanceTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    @staticmethod
+    def balance_score(rows, targets, allowed, minimum):
+        shortage = 0
+        greatest = 0
+        total_deviation = 0
+        floor_cells = 0
+        quarter_extras = 0
+        for alias in sorted(targets):
+            months = sorted(allowed[alias])
+            if not months:
+                continue
+            quotient, remainder = divmod(targets[alias], len(months))
+            for month in months:
+                value = rows[alias][month]
+                if targets[alias] and minimum:
+                    shortage += max(0, minimum - value)
+                    floor_cells += value == minimum
+                greatest = max(greatest, quotient - value, value - quotient - 1)
+                total_deviation += abs(len(months) * value - targets[alias])
+                quarter_extras += bool(remainder and value > quotient and (month + 1) % 3 == 0)
+        return shortage, greatest, total_deviation, floor_cells, -quarter_extras
+
+    def test_soft_minimum_against_exhaustive_oracle(self):
+        rng = random.Random(1106)
+        for case in range(400):
+            capacities = [rng.randrange(4) for _ in range(3)]
+            total = sum(capacities)
+            cuts = sorted([0, total, rng.randrange(total + 1), rng.randrange(total + 1)])
+            targets = {chr(65 + p): cuts[p + 1] - cuts[p] for p in range(3)}
+            allowed = {a: {m for m in range(3) if rng.randrange(2)} for a in targets}
+            minimum = rng.choice((1, 2))
+            aliases = sorted(targets, key=lambda a: (len(allowed[a]), a))
+            choices = {
+                a: [list(row) for row in itertools.product(*(
+                    range(c + 1) if m in allowed[a] else [0] for m, c in enumerate(capacities)))
+                    if sum(row) == targets[a]] for a in aliases}
+            def score(rows):
+                return self.balance_score(rows, targets, allowed, minimum)
+            scores = []
+            for combination in itertools.product(*(choices[a] for a in aliases)):
+                if all(sum(row[m] for row in combination) == capacity
+                       for m, capacity in enumerate(capacities)):
+                    scores.append(score(dict(zip(aliases, combination))))
+            values, shortage, _, _ = transport(targets, allowed, capacities, minimum=minimum)
+            with self.subTest(case=case, minimum=minimum):
+                self.assertEqual(values is not None, bool(scores))
+                if scores:
+                    if any(row[1] == 0 for row in scores):
+                        self.assertEqual(score(values)[1:], min(row[1:] for row in scores if row[1] == 0))
+                    elif any(row[0] == 0 for row in scores):
+                        self.assertEqual(score(values)[1:], min(row[1:] for row in scores if row[0] == 0))
+                    else:
+                        self.assertEqual(score(values), min(scores))
+                    self.assertFalse(minimum_can_improve(targets, allowed, values, minimum))
+                    reversed_values, _, _, _ = transport(dict(reversed(list(targets.items()))),
+                                                         allowed, capacities, minimum=minimum)
+                    self.assertEqual(values, reversed_values)
+                    self.assertEqual(shortage, 0)
+                else:
+                    self.assertGreater(shortage, 0)
+
     def test_reassignment_needed(self):
         # A를 1월에 우선 확정하면 B가 부족하다. A를 2월로 옮겨야 한다.
         values, shortage, _, _ = transport({'A': 1, 'B': 3}, {'A': {0, 1}, 'B': {0, 2}}, [2, 1, 1])
@@ -775,15 +913,9 @@ class TransportTests(unittest.TestCase):
             with self.subTest(case=case):
                 self.assertEqual(values is not None, bool(solutions))
                 if solutions:
-                    def deviation(rows):
-                        errors = []
-                        for alias in order:
-                            months = sorted(allowed[alias])
-                            if months:
-                                q, r = divmod(targets[alias], len(months))
-                                errors.extend(abs(rows[alias][m] - q - (j < r)) for j, m in enumerate(months))
-                        return tuple(errors)
-                    self.assertEqual(deviation(values), min(map(deviation, solutions)))
+                    self.assertEqual(self.balance_score(values, targets, allowed, 0)[1:],
+                                     min(self.balance_score(row, targets, allowed, 0)[1:]
+                                         for row in solutions))
                     self.assertEqual(shortage, 0)
                 else:
                     self.assertGreater(shortage, 0)

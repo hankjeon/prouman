@@ -84,7 +84,7 @@ Windows에서는 `python`으로 실행하거나 `.venv/Scripts/python.exe` 경�
 | [01_basic](01_basic/projects.yaml) | 필수 필드, 사람 1명·사업 1개, 주석 작성 | 오류·경고 없음, 종료 0 |
 | [02_multiple_projects](02_multiple_projects/people/people_2027.yaml) | 사람 3명·사업 3개, 배정 상한과 잔여 | 오류·경고 없음, 종료 0 |
 | [03_excluded_months](03_excluded_months/projects.yaml) | 4~6월 제외, 0 자리 채움, 다른 사업으로 월 가용량 충족 | 오류·경고 없음, 종료 0 |
-| [04_partial_period](04_partial_period/projects.yaml) | 월 중간 시작·종료도 해당 월 전체 허용 | 오류·경고 없음, 종료 0 |
+| [04_partial_period](04_partial_period/projects.yaml) | 월 중간 시작·종료도 해당 월 전체 허용. 기간사업 목표가 4~9월을 전부 사용하므로 연중운영은 해당 월 0 | W006 경고 6건, 오류 없음, 종료 0 |
 | [05_absences](05_absences/people/people_2026.yaml) | 부분월·분기·복수 기간·연중 전체 휴직, 선택 사유, 빈 할당 | 오류·경고 없음, 종료 0 |
 | [06_leap_year](06_leap_year/people/people_2028.yaml) | 2월 29일 하루 휴직, 반올림과 연간 목표 | 오류·경고 없음, 종료 0 |
 | [07_multi_year](07_multi_year/projects.yaml) | 하나의 사업 파일과 3개 연도 입력, 연도별 상한·제외 월 | 세 연도 모두 오류·경고 없음, 종료 0 |

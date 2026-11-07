@@ -1,4 +1,5 @@
 """YAML을 몰라도 사업·사람 입력을 표로 편집하는 위젯."""
+from bisect import bisect_left
 from datetime import date
 
 from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
@@ -6,7 +7,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, 
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QStyleFactory, QToolButton, QVBoxLayout, QWidget)
 
 from . import theme
 from .document import (QUANTITY_HINT, AbsenceEntry, PeopleDoc, PersonEntry, ProjectEntry, YearEntry,
@@ -219,6 +220,8 @@ class ProjectEditor(QWidget):
     alias_removed = Signal(str)
     NAME, ALIAS, START, END, TOTAL = range(5)
     YEARS = 6
+    CENTER = YEARS // 2  # 짝수 열에서는 가운데 두 열 중 오른쪽에 관리 연도를 둔다.
+    FIRST_YEAR, LAST_YEAR = 2020, 2050
     EXCLUDED_WIDE = 1.4  # 제외월 열 너비(연도 열의 1.4배). 연도 열은 등간격이다.
 
     def __init__(self):
@@ -227,7 +230,7 @@ class ProjectEditor(QWidget):
         self.managed_year = lambda: str(date.today().year)  # 관리 연도. 메인 창이 사람 입력과 연결한다.
         self.allow_remove = lambda project: True
         self.year_start = self.base_year()
-        self.excluded_year = self.year_start + 2
+        self.excluded_year = self.managed_year_number()
         self.table = EditTable(['사업명', '약칭', '시작일', '종료일', '총 배정'], row_band=True)
         self.table.set_date_columns(self.START, self.END)
         self.table.horizontalHeader().setSectionResizeMode(self.NAME, QHeaderView.Stretch)
@@ -248,11 +251,6 @@ class ProjectEditor(QWidget):
         self.table.itemChanged.connect(self.project_edited)
         self.grid.itemChanged.connect(self.grid_edited)
 
-        self.prev_button, self.next_button = QToolButton(), QToolButton()
-        self.prev_button.setToolTip('이전 해로 이동')
-        self.next_button.setToolTip('다음 해로 이동')
-        self.prev_button.clicked.connect(lambda: self.shift_years(-1))
-        self.next_button.clicked.connect(lambda: self.shift_years(1))
         self.range_label = QLabel()
         self.notice = QLabel()
         self.notice.setStyleSheet(theme.error_stylesheet())
@@ -263,19 +261,17 @@ class ProjectEditor(QWidget):
         title.addWidget(QLabel('연도별 배정인력'))
         title.addWidget(self.range_label)
         self.year_scroll = QScrollBar(Qt.Horizontal)
+        # Windows 스타일의 화살표는 마우스를 올려야 나타난다. 이 스크롤바에만
+        # Qt 기본 Fusion 스타일을 적용해 양끝 화살표를 항상 그린다.
+        self.year_scroll_style = QStyleFactory.create('Fusion')
+        self.year_scroll.setStyle(self.year_scroll_style)
         self.year_scroll.setSingleStep(1)
         self.year_scroll.setPageStep(self.YEARS)
         self.year_scroll.valueChanged.connect(self.set_year_start)
-        self.scroll_box = QWidget()
-        scroll_row = QHBoxLayout(self.scroll_box)
-        scroll_row.setContentsMargins(0, 0, 0, 0)
-        scroll_row.addWidget(self.prev_button)
-        scroll_row.addWidget(self.year_scroll, 1)
-        scroll_row.addWidget(self.next_button)
-        self.scroll_box.installEventFilter(self)
+        self.year_scroll.installEventFilter(self)
         # 좌우 표 높이를 같게 두어야 세로 스크롤 값 1:1 맞물림이 어긋나지 않는다.
         self.scroll_filler = QWidget()
-        self.scroll_filler.setFixedHeight(self.scroll_box.sizeHint().height())
+        self.scroll_filler.setFixedHeight(self.year_scroll.sizeHint().height())
 
         self.add_button, self.remove_button = QPushButton('사업 추가'), QPushButton('사업 삭제')
         self.add_button.clicked.connect(self.add_project)
@@ -297,7 +293,7 @@ class ProjectEditor(QWidget):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.grid, 1)
-        right_layout.addWidget(self.scroll_box)
+        right_layout.addWidget(self.year_scroll)
         self.split = QSplitter(Qt.Horizontal)
         self.split.addWidget(left)
         self.split.addWidget(right)
@@ -311,21 +307,57 @@ class ProjectEditor(QWidget):
 
     # --- 연도 범위 ---
 
-    def base_year(self):
-        # 처음 창은 관리 연도가 왼쪽에서 세 번째(짝수 6열의 중앙 앞쪽)에 오도록 둔다.
+    def managed_year_number(self):
         year = self.managed_year()
-        return (int(year) if valid_year(year) else date.today().year) - 2
+        return int(year) if valid_year(year) else date.today().year
+
+    def clamp_year_start(self, start):
+        return max(self.FIRST_YEAR, min(start, self.LAST_YEAR - self.YEARS + 1))
+
+    def base_year(self):
+        """배정 연도를 최대한 담고, 그 안에서 관리 연도를 중앙에 가장 가깝게 둔다."""
+        managed = self.managed_year_number()
+        years = sorted({int(entry.year) for project in self.projects for entry in project.years
+                        if valid_year(entry.year) and self.FIRST_YEAR <= int(entry.year) <= self.LAST_YEAR})
+        if not years:
+            return self.clamp_year_start(managed - self.CENTER)
+        return max(range(max(self.FIRST_YEAR, years[0] - self.YEARS + 1),
+                         min(self.LAST_YEAR - self.YEARS + 1, years[-1]) + 1),
+                   key=lambda start: (bisect_left(years, start + self.YEARS) - bisect_left(years, start),
+                                      -abs(2 * (managed - start) - (self.YEARS - 1)),
+                                      -start))
+
+    def selected_year_start(self):
+        start = self.base_year()
+        managed = self.managed_year_number()
+        if self.FIRST_YEAR <= managed <= self.LAST_YEAR and not start <= managed < start + self.YEARS:
+            return self.clamp_year_start(managed - self.CENTER)
+        return start
 
     def years_shown(self):
         return [self.year_start + offset for offset in range(self.YEARS)]
 
     def reset_years(self):
-        """처음 범위(관리 연도 - 2부터 6년)로 돌리고 제외월 열은 관리 연도로 둔다."""
-        self.year_start = self.base_year()
-        self.excluded_year = self.year_start + 2
+        """입력 연도를 반영한 처음 범위로 돌리고 제외월 열은 관리 연도로 둔다."""
+        self.year_start = self.selected_year_start()
+        self.excluded_year = self.managed_year_number()
+        if self.excluded_year not in self.years_shown():
+            self.excluded_year = self.year_start + self.CENTER
         self.refresh_grid()
 
+    def show_selected_year(self):
+        """콤보에서 현재 연도를 다시 골라도 해당 연도와 제외월 열을 보여 준다."""
+        managed = self.managed_year_number()
+        if not self.FIRST_YEAR <= managed <= self.LAST_YEAR:
+            return
+        start = self.year_start if managed in self.years_shown() else self.clamp_year_start(managed - self.CENTER)
+        if start != self.year_start or self.excluded_year != managed:
+            self.year_start = start
+            self.excluded_year = managed
+            self.refresh_grid()
+
     def set_year_start(self, start):
+        start = self.clamp_year_start(start)
         step = 1 if start >= self.year_start else -1
         self.year_start = start
         shown = self.years_shown()
@@ -337,24 +369,21 @@ class ProjectEditor(QWidget):
         self.set_year_start(self.year_start + step)
 
     def update_year_scroll(self):
-        """스크롤 범위는 배정 연도 구간과 현재 창을 함께 덮는다. 버튼으로 벗어나면 범위가 늘어난다."""
-        span = [int(e.year) for project in self.projects for e in project.years if valid_year(e.year)]
-        low = min(span + [self.year_start])
-        high = max([s - self.YEARS + 1 for s in span] + [self.year_start])
+        """6년 창의 처음 연도를 2020~2045로 제한한다."""
         bar = self.year_scroll
         bar.blockSignals(True)
-        bar.setMinimum(low)
-        bar.setMaximum(high)
+        bar.setRange(self.FIRST_YEAR, self.LAST_YEAR - self.YEARS + 1)
         bar.setValue(self.year_start)
-        bar.setEnabled(low != high)
         bar.blockSignals(False)
 
     # --- 데이터 ---
 
     def set_projects(self, projects):
         self.projects = projects
-        self.year_start = self.base_year()
-        self.excluded_year = self.year_start + 2
+        self.year_start = self.selected_year_start()
+        self.excluded_year = self.managed_year_number()
+        if self.excluded_year not in self.years_shown():
+            self.excluded_year = self.year_start + self.CENTER
         self.refresh()
         if projects:
             self.table.setCurrentCell(0, 0)
@@ -456,7 +485,7 @@ class ProjectEditor(QWidget):
             font.setBold(year == managed)
             header.setFont(font)
             header.setToolTip('관리 연도' if year == managed and column < self.YEARS else '')
-        hidden = [0, 0]
+        hidden = [set(), set()]
         unshown = 0
         for row, project in enumerate(self.projects):
             problems = year_problems(project.years)
@@ -466,9 +495,9 @@ class ProjectEditor(QWidget):
                 if (index[id(entry)], 0) in problems:
                     unshown += 1
                 elif int(entry.year) < shown[0]:
-                    hidden[0] += 1
+                    hidden[0].add(int(entry.year))
                 elif int(entry.year) > shown[-1]:
-                    hidden[1] += 1
+                    hidden[1].add(int(entry.year))
             for column, year in enumerate(shown):
                 entry = self.entry(project, year)
                 notes, base = [], None
@@ -483,17 +512,17 @@ class ProjectEditor(QWidget):
                               note='\n'.join(notes))
             entry = self.entry(project, self.excluded_year)
             if entry is None:
-                grid.set_cell(row, self.YEARS, '', editable=False, base=theme.outside_color(),
+                grid.set_cell(row, self.YEARS, '', editable=False,
                               note=f'먼저 {self.excluded_year} 배정인력을 입력하세요.')
             else:
                 grid.set_cell(row, self.YEARS, entry.excluded, problem=problems.get((index[id(entry)], 2), ''))
         grid.blockSignals(False)
-        self.prev_button.setText('◀')
-        self.next_button.setText('▶')
-        self.prev_button.setToolTip(f'이전 해로 이동 (앞쪽에 값이 있는 연도 {hidden[0]}건)' if hidden[0]
-                                    else '이전 해로 이동')
-        self.next_button.setToolTip(f'다음 해로 이동 (뒤쪽에 값이 있는 연도 {hidden[1]}건)' if hidden[1]
-                                    else '다음 해로 이동')
+        tips = ['2020~2050년 보기 · 양끝 화살표: 1년씩 이동, 빈 곳: 6년씩 이동']
+        if hidden[0]:
+            tips.append('앞쪽에 배정이 있는 연도: ' + ', '.join(map(str, sorted(hidden[0]))))
+        if hidden[1]:
+            tips.append('뒤쪽에 배정이 있는 연도: ' + ', '.join(map(str, sorted(hidden[1]))))
+        self.year_scroll.setToolTip('\n'.join(tips))
         self.range_label.setText(f'{shown[0]} ~ {shown[-1]}')
         self.notice.setText(f'표시할 수 없는 연도 항목 {unshown}건 (계산하면 오류로 표시)' if unshown else '')
         self.update_year_scroll()
@@ -511,8 +540,8 @@ class ProjectEditor(QWidget):
         # 표 본체가 바뀌는 시점에는 viewport 너비가 아직 예전 값이라 viewport를 직접 본다.
         if watched is self.grid.viewport() and event.type() == QEvent.Resize:
             self.fit_excluded_column()
-        elif watched is self.scroll_box and event.type() == QEvent.Resize:
-            self.scroll_filler.setFixedHeight(self.scroll_box.height())
+        elif watched is self.year_scroll and event.type() == QEvent.Resize:
+            self.scroll_filler.setFixedHeight(self.year_scroll.height())
         return super().eventFilter(watched, event)
         self.align_current()
 

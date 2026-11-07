@@ -6,7 +6,9 @@
 
 코드 작성 전 `README.md` → `docs/requirements.md` → `docs/data-model.md` → `docs/allocation-algorithm.md` → `docs/validation.md` → `docs/test-cases.md` 순서로 읽는다. 연간 인력 계획 기능을 다룰 때는 `docs/annual-planning.md`도 읽는다. 과거 예시의 월별 직접 입력, 사업 기간 일수 비례 계산, 개인별 `yearly` 묶음, 사업 배정인력 완전 소진은 최종 규칙이 아니다.
 
-1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. 엑셀(.xlsx) 저장(`--excel`)과 PySide6 데스크톱 GUI(`src/allocation/gui.py`)는 1차 범위다. GUI는 계산 엔진과 공용 표(`tables.py`)를 재사용하고 계산 규칙을 따로 두지 않는다. GUI 입력 편집기(`document.py`, `editor.py`)는 편집 내용을 YAML로 만들어 `load_inputs`로 검증하며, 입력 중 안내 외의 검증 규칙을 새로 만들지 않는다. 사업 우선순위 기반 연간 목표 자동 생성은 `docs/annual-planning.md`에 명세만 있으며 아직 구현되지 않았다. 그래프, CSV 출력, exe 패키징은 후속 범위다.
+1차는 Python 오프라인 CLI다. 연간 사람·사업 목표는 사용자가 입력하고, 프로그램은 월별 균등 배분과 검증을 수행한다. 엑셀(.xlsx) 저장(`--excel`)과 PySide6 데스크톱 GUI(`src/allocation/gui.py`)는 1차 범위다. GUI는 계산 엔진과 공용 표(`tables.py`)를 재사용하고 계산 규칙을 따로 두지 않는다. GUI 입력 편집기(`document.py`, `editor.py`)는 편집 내용을 YAML로 만들어 `load_inputs`로 검증하며, 입력 중 안내 외의 검증 규칙을 새로 만들지 않는다. 사업 우선순위 기반 연간 목표 초안 생성은 `docs/annual-planning.md`에 따라 별도 계획 화면·계산 모듈로 구현되었다. Windows GUI 단일 실행파일은 `build_win.ps1`으로 생성한다. 그래프와 CSV 출력은 후속 범위다.
+
+배포용 Windows 실행파일 빌드는 사용자가 **명시적으로 요청할 때에만** `build_win.ps1`로 수행한다. 소스 수정, 테스트 통과 또는 기능 구현만을 이유로 `publish/win/Prouman.exe`를 자동으로 다시 만들지 않는다. 일반 작업의 검증은 소스 기반 테스트로 수행한다.
 
 ## 필수 구현 원칙
 
@@ -29,4 +31,4 @@
 
 작업 시작 시 저장소 루트의 `SESSION.md`에서 최신 관련 항목과 남은 일을 확인한다. 작업 종료 전 날짜·주제별 항목에 사용자와 합의한 결정, **실제로 한 일**, 실행한 검증과 결과, 검증하지 못한 경계, 다음 할 일과 막힌 이유를 남긴다. 계획·추정·테스트 예정만으로 완료 처리하지 않는다. 관련 명세가 바뀌면 해당 문서와 세션 기록을 함께 갱신한다. 과거 기능별 기록은 `docs/development-log.md`에 남겨 두고, 새 작업은 `SESSION.md`에 기록한다.
 
-**다음 작업 세션 시작 알림:** 다른 일을 시작하기 전에 사용자에게 연간 인력 계획 기능은 **구현 계획 문서만 완료했고 코드는 아직 구현하지 않았음**을 먼저 알린다. 구현 기준은 `docs/annual-planning.md`, 이어 할 일은 `SESSION.md`의 최신 항목에 있다. 사용자가 새 작업의 우선순위를 달리 지정하면 그 지시를 따른다.
+연간 인력 계획의 현재 구현·검증 경계와 남은 일은 `SESSION.md`의 최신 항목을 따른다. 사용자가 새 작업의 우선순위를 달리 지정하면 그 지시를 따른다.

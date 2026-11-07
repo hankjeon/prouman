@@ -61,6 +61,20 @@ class PeopleDoc:
     people: list = field(default_factory=list)
 
 
+@dataclass
+class PlanPersonEntry:
+    name: str = ''
+    priorities: dict = field(default_factory=dict)  # 사업약칭 → 순위 문자열
+    draft_allocations: dict | None = None  # None은 아직 초안이 없음을 뜻한다.
+    absences: list = field(default_factory=list)
+
+
+@dataclass
+class PlanDoc:
+    year: str = field(default_factory=lambda: str(date.today().year))
+    people: list = field(default_factory=list)
+
+
 # --- YAML 읽기 -------------------------------------------------------------------------------
 
 class _Reader:
@@ -136,7 +150,9 @@ def read_projects(text):
 def read_people(text):
     """사람 YAML을 (PeopleDoc, 무시한 항목)으로 읽는다."""
     reader = _Reader()
-    root = reader.mapping(reader.parse(text), 'people.yaml', {'year', 'people'})
+    root = reader.mapping(reader.parse(text), 'people.yaml', {'year', 'stage', 'people'})
+    if 'stage' in root and root['stage'] != 'confirmed':
+        raise DocumentError('확정 사람 파일은 stage: confirmed여야 합니다.')
     doc = PeopleDoc(reader.scalar(root.get('year'), 'year'), [])
     for idx, raw in enumerate(reader.sequence(root.get('people'), 'people')):
         where = f'people[{idx}]'
@@ -154,6 +170,42 @@ def read_people(text):
     return doc, reader.dropped
 
 
+def read_plan(text):
+    """계획 파일을 편집 가능한 문서로 읽는다. 중복 키는 계획에서 버리지 않는다."""
+    reader = _Reader()
+    root = reader.mapping(reader.parse(text), 'plan.yaml', {'year', 'stage', 'people'})
+    if reader.dropped:
+        raise DocumentError('중복 또는 지원하지 않는 키: ' + ', '.join(reader.dropped))
+    if root.get('stage') != 'planning':
+        raise DocumentError('계획 파일은 stage: planning이어야 합니다.')
+    doc = PlanDoc(reader.scalar(root.get('year'), 'year'), [])
+    for idx, raw in enumerate(reader.sequence(root.get('people'), 'people')):
+        where = f'people[{idx}]'
+        item = reader.mapping(raw, where, {'name', 'priorities', 'draft_allocations', 'absences'})
+        person = PlanPersonEntry(reader.scalar(item.get('name'), where + '.name'))
+        for key, value in reader.mapping(item.get('priorities'), where + '.priorities').items():
+            alias = reader.scalar(key, where + '.priorities').strip()
+            if alias in person.priorities:
+                raise DocumentError(f'{where}.priorities: 공백 제거 후 중복된 사업약칭 {alias}')
+            person.priorities[alias] = reader.scalar(value, f'{where}.priorities[{alias}]').strip()
+        if 'draft_allocations' in item:
+            person.draft_allocations = {}
+            for key, value in reader.mapping(item['draft_allocations'], where + '.draft_allocations').items():
+                alias = reader.scalar(key, where + '.draft_allocations').strip()
+                if alias in person.draft_allocations:
+                    raise DocumentError(f'{where}.draft_allocations: 공백 제거 후 중복된 사업약칭 {alias}')
+                person.draft_allocations[alias] = reader.scalar(value, f'{where}.draft_allocations[{alias}]').strip()
+        for j, raw_absence in enumerate(reader.sequence(item.get('absences'), where + '.absences')):
+            loc = f'{where}.absences[{j}]'
+            absence = reader.mapping(raw_absence, loc, {'period', 'reason'})
+            person.absences.append(AbsenceEntry(*reader.period(absence.get('period'), loc + '.period'),
+                                                reader.scalar(absence.get('reason'), loc + '.reason')))
+        doc.people.append(person)
+    if reader.dropped:
+        raise DocumentError('중복 또는 지원하지 않는 키: ' + ', '.join(reader.dropped))
+    return doc
+
+
 def detect_kind(text):
     """YAML 최상위 키로 사업/사람 문서를 구분한다. 둘 다 아니면 None. 문법 오류는 DocumentError."""
     root = _Reader().parse(text)
@@ -162,7 +214,9 @@ def detect_kind(text):
     has_projects, has_people = 'projects' in root, 'people' in root
     if has_projects == has_people:
         return None
-    return 'projects' if has_projects else 'people'
+    if has_projects:
+        return 'projects'
+    return 'plan' if root.get('stage') == 'planning' else 'people'
 
 
 # --- YAML 쓰기 -------------------------------------------------------------------------------
@@ -174,7 +228,7 @@ def _text(value):
 
 def _integer(value):
     # 연도·월은 정수로 써야 한다. 숫자가 아니면 문자열로 써서 검증 오류로 보이게 한다.
-    value = value.strip()
+    value = str(value).strip()
     return value if re.fullmatch(r'[0-9]+', value) else _text(value)
 
 
@@ -203,7 +257,7 @@ def dump_projects(projects):
 
 
 def dump_people(doc):
-    lines = [HEADER, f'year: {_integer(doc.year)}']
+    lines = [HEADER, f'year: {_integer(doc.year)}', 'stage: confirmed']
     if not doc.people:
         return '\n'.join(lines + ['people: []']) + '\n'
     lines.append('people:')
@@ -221,6 +275,35 @@ def dump_people(doc):
             continue
         lines.append('    allocations:')
         lines += [f'      {_text(alias)}: {_text(value.strip())}' for alias, value in allocations.items()]
+    return '\n'.join(lines) + '\n'
+
+
+def dump_plan(doc):
+    lines = [HEADER, f'year: {_integer(doc.year)}', 'stage: planning']
+    if not doc.people:
+        return '\n'.join(lines + ['people: []']) + '\n'
+    lines.append('people:')
+    for person in doc.people:
+        lines.append(f'  - name: {_text(person.name)}')
+        if person.absences:
+            lines.append('    absences:')
+            for absence in person.absences:
+                lines.append(f'      - period: {_text(f"{absence.start.strip()}~{absence.end.strip()}")}')
+                if absence.reason:
+                    lines.append(f'        reason: {_text(absence.reason)}')
+        if person.priorities:
+            lines.append('    priorities:')
+            for alias, rank in person.priorities.items():
+                lines.append(f'      {_text(alias)}: {_integer(rank)}')
+        else:
+            lines.append('    priorities: {}')
+        if person.draft_allocations is not None:
+            if person.draft_allocations:
+                lines.append('    draft_allocations:')
+                for alias, value in person.draft_allocations.items():
+                    lines.append(f'      {_text(alias)}: {_text(value.strip())}')
+            else:
+                lines.append('    draft_allocations: {}')
     return '\n'.join(lines) + '\n'
 
 

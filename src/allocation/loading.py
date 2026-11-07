@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import Inputs, Issue, Person, Project, YearBudget
+from .models import Inputs, Issue, Person, PlanPerson, PlanningInputs, Project, YearBudget
 
 
 class Number(str):
@@ -197,8 +197,10 @@ class Validator:
         return dict(sorted(projects.items()))
 
     def people(self, value, path, projects, check_aliases=True):
-        root = self.mapping(value, path, {'year', 'people'})
+        root = self.mapping(value, path, {'year', 'people'}, {'stage'})
         year = self.integer(root.get('year', MISSING), path + '.year', 1000, 9999)
+        if 'stage' in root and root['stage'] != 'confirmed':
+            self.error('E003', path + '.stage', root['stage'], '확정 파일의 stage: confirmed; 계획 파일은 계획 화면에서 열기')
         people = {}
         for idx, raw in enumerate(self.sequence(root.get('people', MISSING), path + '.people', True)):
             where = f'{path}.people[{idx}]'
@@ -235,6 +237,66 @@ class Validator:
                 people[name] = Person(name, tuple(sorted(absences)), dict(sorted(targets.items())))
         return year, dict(sorted(people.items()))
 
+    def plan_people(self, value, path, projects, check_aliases=True):
+        root = self.mapping(value, path, {'year', 'stage', 'people'})
+        year = self.integer(root.get('year', MISSING), path + '.year', 1000, 9999)
+        if root.get('stage') != 'planning':
+            self.error('E003', path + '.stage', root.get('stage', MISSING), 'stage: planning')
+        people = {}
+        for idx, raw in enumerate(self.sequence(root.get('people', MISSING), f'{path}.people', True)):
+            where = f'{path}.people[{idx}]'
+            item = self.mapping(raw, where, {'name', 'priorities'}, {'absences', 'draft_allocations'})
+            name = self.text(item.get('name', MISSING), where + '.name')
+            absences = []
+            for j, raw_absence in enumerate(self.sequence(item.get('absences', []), where + '.absences')):
+                loc = f'{where}.absences[{j}]'
+                absence = self.mapping(raw_absence, loc, {'period'}, {'reason'})
+                period = self.period(absence.get('period', MISSING), loc + '.period')
+                if 'reason' in absence and type(absence['reason']) is not str:
+                    self.error('E003', loc + '.reason', absence['reason'], '문자열')
+                if period:
+                    absences.append(period)
+            priorities = {}
+            raw_priorities = item.get('priorities', MISSING)
+            if type(raw_priorities) is not dict:
+                self.error('E003', where + '.priorities', raw_priorities, '사업약칭 → 양의 정수 우선순위 mapping')
+                raw_priorities = {}
+            for raw_alias, raw_rank in raw_priorities.items():
+                loc = f'{where}.priorities[{raw_alias}]'
+                alias = self.text(raw_alias, loc, trim=True, alias=True)
+                rank = self.integer(raw_rank, loc, 1, 999999)
+                if alias is not None:
+                    if alias in priorities:
+                        self.error('E004', loc, alias, '공백 제거 후 중복 없는 사업약칭')
+                    elif rank is not None:
+                        priorities[alias] = rank
+                    if check_aliases and alias not in projects:
+                        self.error('E007', loc, alias, '사업 파일에 등록된 사업약칭')
+            drafts = None
+            if 'draft_allocations' in item:
+                drafts = {}
+                raw_drafts = item['draft_allocations']
+                if type(raw_drafts) is not dict:
+                    self.error('E003', where + '.draft_allocations', raw_drafts, '사업약칭 → 초안 수량 mapping')
+                    raw_drafts = {}
+                for raw_alias, raw_quantity in raw_drafts.items():
+                    loc = f'{where}.draft_allocations[{raw_alias}]'
+                    alias = self.text(raw_alias, loc, trim=True, alias=True)
+                    quantity = self.quantity(raw_quantity, loc)
+                    if alias is not None:
+                        if alias in drafts:
+                            self.error('E004', loc, alias, '공백 제거 후 중복 없는 사업약칭')
+                        elif alias not in priorities:
+                            self.error('E007', loc, alias, 'priorities에 선택한 사업약칭')
+                        elif quantity is not None:
+                            drafts[alias] = quantity
+            if name in people:
+                self.error('E004', where + '.name', name, '고유한 사람 이름')
+            elif name is not None:
+                people[name] = PlanPerson(name, tuple(sorted(absences)), dict(sorted(priorities.items())),
+                                          None if drafts is None else dict(sorted(drafts.items())))
+        return year, dict(sorted(people.items()))
+
 
 def load_inputs(project_file='projects.yaml', people_file=None, texts=None):
     """texts={'projects': ..., 'people': ...}를 주면 파일 대신 그 YAML 문자열을 검증한다."""
@@ -249,3 +311,16 @@ def load_inputs(project_file='projects.yaml', people_file=None, texts=None):
     if not any(issue.severity == 'ERROR' for issue in validator.issues):
         inputs = Inputs(year, projects, people, str(project_file), str(people_file))
     return inputs, validator.issues
+
+
+def load_plan(project_file='projects.yaml', plan_file=None, texts=None):
+    """계획 YAML을 기존 사업·수량·날짜 검증 규칙으로 읽는다."""
+    texts = texts or {}
+    validator = Validator()
+    projects = validator.projects(validator.read(project_file, texts.get('projects')), str(project_file))
+    project_ok = not any(issue.severity == 'ERROR' for issue in validator.issues)
+    year, people = validator.plan_people(validator.read(plan_file, texts.get('plan')), str(plan_file), projects,
+                                         check_aliases=project_ok)
+    plan = None if any(issue.severity == 'ERROR' for issue in validator.issues) else PlanningInputs(
+        year, projects, people, str(project_file), str(plan_file))
+    return plan, validator.issues

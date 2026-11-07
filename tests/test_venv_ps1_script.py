@@ -24,7 +24,7 @@ PWSH = pwsh_binary()
 class VenvPs1ScriptTests(unittest.TestCase):
     def run_pwsh(self, command, input=None, timeout=30):
         return subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-Command', command],
-                              text=True, capture_output=True, timeout=timeout, input=input)
+                              text=True, encoding='utf-8', capture_output=True, timeout=timeout, input=input)
 
     def test_syntax_is_valid(self):
         script = str(SCRIPT).replace("'", "''")
