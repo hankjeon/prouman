@@ -22,10 +22,11 @@ def project(alias, limit='2', period='2027-01-01~2027-12-31', excluded=()):
 
 
 def person(name='홍길동', priorities=None, absences=(), draft=None):
-    value = {'name': name, 'priorities': priorities if priorities is not None else {'사업1': 1},
+    ranks = priorities if priorities is not None else {'사업1': 1}
+    value = {'name': name, 'draft': {alias: '0' for alias in ranks}, 'priorities': ranks,
              'absences': [{'period': p} for p in absences]}
     if draft is not None:
-        value['draft_allocations'] = draft
+        value['allocations'] = draft
     return value
 
 
@@ -43,7 +44,7 @@ class PlanningTests(unittest.TestCase):
         for priorities, expected in (({'사업1': 1, '사업2': 2}, {'사업1': '0.60000', '사업2': '0.40000'}),
                                      ({'사업1': 1, '사업2': 1}, {'사업1': '0.50000', '사업2': '0.50000'}),
                                      ({'사업1': 1, '사업2': 1, '사업3': 3},
-                                      {'사업1': '0.40000', '사업2': '0.40000', '사업3': '0.20000'})):
+                                       {'사업1': '0.38000', '사업2': '0.37000', '사업3': '0.25000'})):
             with self.subTest(priorities=priorities):
                 result = generate_plan(self.load(projects, [person(priorities=priorities)]))
                 self.assertTrue(result.complete, result.review.issues)
@@ -88,9 +89,10 @@ class PlanningTests(unittest.TestCase):
         review = review_plan(plan)
         self.assertTrue(review.has_errors)
         self.assertTrue(any(issue.code == 'E103' for issue in review.issues))
-        doc = PlanDoc('2027', [PlanPersonEntry('홍길동', {'사업1': '1', '사업2': '2'},
-                                              {'사업1': '0.60000', '사업2': '0.40000'})])
-        self.assertEqual(read_plan(dump_plan(doc)).people[0].draft_allocations,
+        doc = PlanDoc('2027', [PlanPersonEntry('홍길동', {'사업1': '0', '사업2': '0'},
+                                              priorities={'사업1': '1', '사업2': '2'},
+                                              allocations={'사업1': '0.60000', '사업2': '0.40000'})])
+        self.assertEqual(read_plan(dump_plan(doc)).people[0].allocations,
                          {'사업1': '0.60000', '사업2': '0.40000'})
 
     def test_monthly_minimum_warning_allows_plan_confirmation(self):
@@ -115,7 +117,7 @@ class PlanningTests(unittest.TestCase):
         self.assertIsNotNone(load_inputs('p', 'h', {'projects': projects, 'people': confirmed})[0])
         self.assertIsNotNone(load_inputs('p', 'h', {'projects': projects,
                                                  'people': confirmed.replace('stage: confirmed\n', '')})[0])
-        for bad in (plan_text.replace('priorities:', 'allocations:'),
+        for bad in (plan_text.replace('draft:', 'allocations:'),
                     plan_text.replace('사업1: 1', '사업1: 0'),
                     plan_text.replace('priorities:', 'priorities:\n      사업1: 1\n    draft_allocations:\n      사업2: "0.1"\n    ignored:')):
             value, issues = load_plan('p', 'h', {'projects': projects, 'plan': bad})

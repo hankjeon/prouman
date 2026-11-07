@@ -43,7 +43,7 @@ class PlanningPage(QWidget):
         left_layout.addWidget(self.people_list)
         left_layout.addLayout(person_actions)
 
-        self.priorities = EditTable(['사업', '우선순위'])
+        self.priorities = EditTable(['사업', '참고 점수', '명시 순위 (선택)'])
         self.priorities.setItemDelegateForColumn(0, ProjectDelegate(self.priorities, self.choices))
         self.priorities.itemChanged.connect(self.priority_edited)
         add_project = QPushButton('참여 사업 추가')
@@ -65,7 +65,7 @@ class PlanningPage(QWidget):
         absence_actions.addWidget(remove_absence)
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.addWidget(QLabel('선택한 사람의 참여 사업·우선순위 (1이 가장 높음, 같은 순위 가능)'))
+        right_layout.addWidget(QLabel('참고 점수는 큰 값 우선 · 명시 순위는 작은 값 우선 (하나라도 입력하면 빈 순위는 최하위)'))
         right_layout.addWidget(self.priorities)
         right_layout.addLayout(priority_actions)
         right_layout.addWidget(QLabel('휴직 기간'))
@@ -75,6 +75,7 @@ class PlanningPage(QWidget):
         upper.addWidget(left)
         upper.addWidget(right)
         upper.setSizes([230, 950])
+        self.input_widget = upper
 
         self.matrix = EditTable()
         self.matrix.itemChanged.connect(self.draft_edited)
@@ -82,11 +83,11 @@ class PlanningPage(QWidget):
         self.issues = EditTable(['등급', '코드', '위치', '현재 값', '요구값', '조치'])
         self.issues.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.status = QLabel()
-        self.generate_button = QPushButton('초안 생성')
+        self.generate_button = QPushButton('계획 계산 / 재계산')
         self.generate_button.clicked.connect(self.generate)
         self.save_button = QPushButton('계획 저장')
         self.save_button.clicked.connect(self.save_requested.emit)
-        self.confirm_button = QPushButton('확정 파일 만들기')
+        self.confirm_button = QPushButton('내보내기 — 확정 자료')
         self.confirm_button.clicked.connect(self.confirm_requested.emit)
         actions = QHBoxLayout()
         for button in (self.generate_button, self.save_button, self.confirm_button):
@@ -94,7 +95,6 @@ class PlanningPage(QWidget):
         actions.addStretch()
         layout = QVBoxLayout(self)
         layout.addWidget(self.title)
-        layout.addWidget(upper, 2)
         layout.addWidget(QLabel('사람 × 사업 연간 참여율 초안 (선택 사업 칸만 직접 편집)'))
         layout.addWidget(self.matrix, 2)
         layout.addWidget(self.status)
@@ -135,11 +135,12 @@ class PlanningPage(QWidget):
             return
         self._refreshing = True
         person = self.current()
-        self.priorities.setRowCount(len(person.priorities) if person else 0)
+        self.priorities.setRowCount(len(self.person_keys(person)) if person else 0)
         if person:
-            for row, (alias, rank) in enumerate(person.priorities.items()):
+            for row, alias in enumerate(self.person_keys(person)):
                 self.priorities.set_cell(row, 0, alias)
-                self.priorities.set_cell(row, 1, rank)
+                self.priorities.set_cell(row, 1, person.draft.get(alias, ''))
+                self.priorities.set_cell(row, 2, person.priorities.get(alias, ''))
         self.absences.setRowCount(len(person.absences) if person else 0)
         if person:
             for row, entry in enumerate(person.absences):
@@ -184,19 +185,21 @@ class PlanningPage(QWidget):
         year = self.doc.year
         result = []
         for project in self.projects():
-            budget = next((entry for entry in project.years if entry.year == year), None)
             start, end = to_date(project.start), to_date(project.end)
-            if (budget is not None and (quantity_units(budget.manpower) or 0) > 0
-                    and valid_year(year) and start and end
+            if (valid_year(year) and start and end
                     and start.year <= int(year) <= end.year):
                 result.append((project.alias.strip(), f'{project.alias} — {project.name}'))
         return sorted(result)
+
+    @staticmethod
+    def person_keys(person):
+        return list(dict.fromkeys(list(person.draft) + list(person.priorities)))
 
     def choices(self, row):
         person = self.current()
         if person is None:
             return []
-        keys = list(person.priorities)
+        keys = self.person_keys(person)
         current = keys[row] if row < len(keys) else ''
         taken = set(keys) - {current}
         return [(alias, label) for alias, label in self.available() if alias not in taken]
@@ -207,7 +210,7 @@ class PlanningPage(QWidget):
         person = self.current()
         if person is None:
             return
-        keys = list(person.priorities)
+        keys = self.person_keys(person)
         old = keys[item.row()]
         value = item.text().strip()
         if item.column() == 0:
@@ -215,11 +218,17 @@ class PlanningPage(QWidget):
                 self.show_person()
                 return
             person.priorities = {value if key == old else key: rank for key, rank in person.priorities.items()}
-            if person.draft_allocations is not None and old in person.draft_allocations:
-                person.draft_allocations = {value if key == old else key: rate
-                                            for key, rate in person.draft_allocations.items()}
+            person.draft = {value if key == old else key: score for key, score in person.draft.items()}
+            if person.allocations is not None and old in person.allocations:
+                person.allocations = {value if key == old else key: rate
+                                      for key, rate in person.allocations.items()}
+        elif item.column() == 1:
+            person.draft[old] = value
         else:
-            person.priorities[old] = value
+            if value:
+                person.priorities[old] = value
+            else:
+                person.priorities.pop(old, None)
         self.show_person()
         self._changed()
 
@@ -227,25 +236,26 @@ class PlanningPage(QWidget):
         person = self.current()
         if person is None:
             return
-        choices = self.choices(len(person.priorities))
+        choices = self.choices(len(self.person_keys(person)))
         if not choices:
             self.status.setText('선택할 수 있는 사업이 없습니다. 사업 입력의 해당 연도 배정을 확인하세요.')
             return
         alias = choices[0][0]
-        person.priorities[alias] = '1'
+        person.draft[alias] = '0.0'
         self.show_person()
-        self.priorities.setCurrentCell(len(person.priorities) - 1, 0)
+        self.priorities.setCurrentCell(len(self.person_keys(person)) - 1, 0)
         self.priorities.editItem(self.priorities.currentItem())
         self._changed()
 
     def remove_project(self):
         person, row = self.current(), self.priorities.currentRow()
-        if person is None or not 0 <= row < len(person.priorities):
+        if person is None or not 0 <= row < len(self.person_keys(person)):
             return
-        alias = list(person.priorities)[row]
-        person.priorities.pop(alias)
-        if person.draft_allocations is not None:
-            person.draft_allocations.pop(alias, None)
+        alias = self.person_keys(person)[row]
+        person.priorities.pop(alias, None)
+        person.draft.pop(alias, None)
+        if person.allocations is not None:
+            person.allocations.pop(alias, None)
         self.show_person()
         self._changed()
 
@@ -270,9 +280,14 @@ class PlanningPage(QWidget):
             self.show_person()
             self._changed()
 
-    def load_current(self):
+    def load_current(self, include_results=True):
+        doc = self.doc
+        if not include_results:
+            doc = deepcopy(doc)
+            for person in doc.people:
+                person.allocations = None
         return load_plan('(현재 사업 입력)', self.plan_path,
-                         {'projects': dump_projects(self.projects()), 'plan': dump_plan(self.doc)})
+                         {'projects': dump_projects(self.projects()), 'plan': dump_plan(doc)})
 
     def refresh_review(self):
         plan, load_issues = self.load_current()
@@ -282,14 +297,17 @@ class PlanningPage(QWidget):
         self._show_matrix(plan, issues)
         person = self.current()
         if person is not None:
-            for row, alias in enumerate(person.priorities):
+            for row, alias in enumerate(self.person_keys(person)):
                 self.priorities.mark(row, 0, '')
                 self.priorities.mark(row, 1, '')
+                self.priorities.mark(row, 2, '')
                 for issue in issues:
                     if issue.severity != 'ERROR' or person.name not in issue.location:
                         continue
                     if f'.priorities[{alias}]' in issue.location:
-                        self.priorities.mark(row, 1 if issue.code == 'E003' else 0, issue.hint)
+                        self.priorities.mark(row, 2, issue.hint)
+                    if f'.draft[{alias}]' in issue.location:
+                        self.priorities.mark(row, 1, issue.hint)
             for row in range(len(person.absences)):
                 self.absences.mark(row, 0, '')
                 self.absences.mark(row, 1, '')
@@ -307,12 +325,15 @@ class PlanningPage(QWidget):
         errors = sum(issue.severity == 'ERROR' for issue in issues)
         warnings = sum(issue.severity == 'WARNING' for issue in issues)
         detail = f' · {self.last_generation.precision}' if self.last_generation else ''
+        if self.doc.migrated:
+            detail += ' · 이전 형식 변환: 참고점수 0, 기존 순위·결과 보존 (저장하면 새 형식)'
         self.status.setText(f'{self.doc.year}년 계획 · ERROR {errors}건 / WARNING {warnings}건{detail}')
         return plan, review
 
     def _show_matrix(self, plan, issues):
-        known = [project.alias.strip() for project in self.projects() if project.alias.strip()]
-        used = {alias for person in self.doc.people for alias in person.priorities}
+        known = [alias for alias, _ in self.available()]
+        used = {alias for person in self.doc.people
+                for alias in set(self.person_keys(person)) | set(person.allocations or {})}
         self.column_aliases = list(dict.fromkeys(known)) + sorted(used - set(known))
         aliases = self.column_aliases
         matrix = self.matrix
@@ -335,17 +356,17 @@ class PlanningPage(QWidget):
         invalid = set()
         for row, person in enumerate(self.doc.people):
             matrix.set_cell(row, 0, person.name, editable=False)
-            values = person.draft_allocations or {}
+            values = person.allocations or {}
             total = 0
             for column, alias in enumerate(aliases, 1):
-                selected = alias in person.priorities
-                value = values.get(alias, '') if selected else ''
+                selected = alias in person.draft
+                value = values.get(alias, '')
                 units = quantity_units(value) if value != '' else 0
                 problem = ''
-                if selected and value and units is None:
+                if value and units is None:
                     problem = '소수 5자리 이하의 비음수 수량을 입력하세요.'
                     invalid.add(alias)
-                elif selected and units is not None:
+                elif units is not None:
                     total += units
                     totals[alias] += units
                     if units < 1000 and plan is not None and any(i.code == 'P102' and person.name in i.location
@@ -355,7 +376,9 @@ class PlanningPage(QWidget):
                         problem = '이 사업의 연간 할당 합계가 상한을 초과했습니다.'
                     elif any(i.code == 'E201' for i in person_errors.get(person.name, [])):
                         problem = '이 사람의 월별 허용량에 배분할 수 없습니다.'
-                matrix.set_cell(row, column, value, editable=selected, problem=problem,
+                if value and not selected:
+                    problem = '참여 목록에 없는 결과입니다. 입력의 참여 사업을 확인하세요.'
+                matrix.set_cell(row, column, value, editable=selected or alias in values, problem=problem,
                                 note='선택한 사업의 연간 참여율을 직접 수정합니다.' if selected else '선택하지 않은 사업')
             absence = None
             if plan is not None:
@@ -401,30 +424,30 @@ class PlanningPage(QWidget):
             return
         person = self.doc.people[item.row()]
         alias = self.column_aliases[item.column() - 1]
-        if alias not in person.priorities:
+        if alias not in person.draft and alias not in (person.allocations or {}):
             return
-        if person.draft_allocations is None:
-            person.draft_allocations = {}
+        if person.allocations is None:
+            person.allocations = {}
         value = item.text().strip()
         if value:
-            person.draft_allocations[alias] = value
+            person.allocations[alias] = value
         else:
-            person.draft_allocations.pop(alias, None)
+            person.allocations.pop(alias, None)
         self.last_generation = None
         self._changed()
 
     def generate(self):
-        plan, _ = self.load_current()
+        plan, _ = self.load_current(include_results=False)
         if plan is None:
             self.refresh_review()
             return False
-        if any(person.draft_allocations is not None for person in self.doc.people):
+        if any(person.allocations is not None for person in self.doc.people):
             from PySide6.QtWidgets import QMessageBox
             if QMessageBox.question(self, '초안 다시 생성', '현재 초안과 수동 수정값을 덮어쓸까요?') != QMessageBox.Yes:
                 return False
         generated = generate_plan(plan)
         for person in self.doc.people:
-            person.draft_allocations = {alias: amount(value) for alias, value in generated.targets[person.name].items()}
+            person.allocations = {alias: amount(value) for alias, value in generated.targets[person.name].items()}
         self._changed()
         self.last_generation = generated
         self.refresh_review()
@@ -432,6 +455,6 @@ class PlanningPage(QWidget):
 
     def confirmed_doc(self):
         from .document import PeopleDoc, PersonEntry
-        people = [PersonEntry(person.name, deepcopy(person.draft_allocations or {}), deepcopy(person.absences))
+        people = [PersonEntry(person.name, deepcopy(person.allocations or {}), deepcopy(person.absences))
                   for person in self.doc.people]
         return PeopleDoc(self.doc.year, people)
