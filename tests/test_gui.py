@@ -30,7 +30,7 @@ from allocation.loading import load_inputs
 
 if QApplication is not None:
     from allocation import theme
-    from allocation.gui import (DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, MainWindow, SelectionDelegate,
+    from allocation.gui import (DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE, WorkspaceWindow, SelectionDelegate,
                                 find_projects_file, severity_colors)
 
 
@@ -51,8 +51,8 @@ class GuiTests(unittest.TestCase):
         self.export_folders = []  # 내보내기 폴더 대화상자에 줄 경로
         self.year_answers = []  # 연도 추가 대화상자에 줄 연도
 
-    def window(self):
-        window = MainWindow(self.settings)
+    def window(self, planning=False):
+        window = WorkspaceWindow(self.settings, planning=planning)
         window.warn = lambda title, text: self.warnings.append((title, text))
         window.ask_export = lambda desc: self.export_answers.pop(0) if self.export_answers else 'discard'
         window.confirm = lambda title, text: self.confirm_answer
@@ -88,12 +88,13 @@ class GuiTests(unittest.TestCase):
         plan_path = self.path / 'plans' / 'plan_2027.yaml'
         plan_path.parent.mkdir()
         plan_path.write_text(dump_plan(PlanDoc('2027',
-            [PlanPersonEntry('홍길동', {'사업1': '1', '사업2': '2'})])), encoding='utf-8')
-        w = self.window()
+            [PlanPersonEntry('홍길동', {'사업1': '0', '사업2': '0'},
+                             priorities={'사업1': '1', '사업2': '2'})])), encoding='utf-8')
+        w = self.window(planning=True)
         errors, _ = w.import_files([str(project_path), str(plan_path)])
         self.assertEqual(errors, [])
-        w.show_page(w.PLAN_PAGE)
-        self.assertEqual(w.pages.currentIndex(), w.PLAN_PAGE)
+        w.show_page(w.RESULT_PAGE)
+        self.assertEqual(w.pages.currentIndex(), w.RESULT_PAGE)
         self.assertTrue(w.planning_page.generate())
         self.assertEqual(w.planning_page.matrix.item(0, 1).text(), '0.60000')
         self.assertEqual(w.planning_page.matrix.item(0, 2).text(), '0.40000')
@@ -105,27 +106,28 @@ class GuiTests(unittest.TestCase):
         self.assertFalse(w.confirm_plan(self.path))
         self.assertFalse((self.path / 'people' / 'people_2027.yaml').exists())
 
-        second = self.window()
-        self.assertEqual(second.planning_page.doc.people[0].draft_allocations['사업1'], '0.70000')
+        second = self.window(planning=True)
+        self.assertEqual(second.planning_page.doc.people[0].allocations['사업1'], '0.70000')
         with patch.object(QMessageBox, 'question', return_value=QMessageBox.No):
             self.assertFalse(second.planning_page.generate())
-        self.assertEqual(second.planning_page.doc.people[0].draft_allocations['사업1'], '0.70000')
+        self.assertEqual(second.planning_page.doc.people[0].allocations['사업1'], '0.70000')
         second.planning_page.matrix.item(0, 1).setText('0.60000')
         self.assertTrue(second.planning_page.confirm_button.isEnabled())
-        self.assertTrue(second.confirm_plan(self.path))
-        confirmed = self.path / 'people' / 'people_2027.yaml'
+        output = self.path / 'confirmed'
+        self.assertTrue(second.confirm_plan(output))
+        confirmed = output / 'people' / 'people_2027.yaml'
         self.assertIn('stage: confirmed', confirmed.read_text(encoding='utf-8'))
-        self.assertIn('0.60000', plan_path.read_text(encoding='utf-8'))
-        inputs, issues = load_inputs(project_path, confirmed)
+        self.assertIn('0.70000', plan_path.read_text(encoding='utf-8'))
+        inputs, issues = load_inputs(output / 'projects.yaml', confirmed)
         self.assertIsNotNone(inputs, issues)
         self.assertFalse(calculate(inputs, issues).has_errors)
 
     def test_plan_empty_people_still_shows_project_limit(self):
-        w = self.window()
+        w = self.window(planning=True)
         year = w.current_year
         w.project_editor.set_projects([ProjectEntry('사업1', '사업1', f'{year}-01-01', f'{year}-12-31',
                                                     [YearEntry(year, '1.5')])])
-        w.show_page(w.PLAN_PAGE)
+        w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.planning_page.matrix.item(1, 1).text(), '1.50000')
         self.assertEqual(w.planning_page.matrix.item(2, 1).text(), '1.50000')
 
@@ -313,7 +315,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.font().pointSize(), DEFAULT_FONT_SIZE)
         menus = {a.text(): a.menu() for a in w.menuBar().actions()}
         self.assertEqual([a.text() for a in menus['보기'].actions()],
-                         ['입력 화면', '결과 화면', '계획 화면', '', '글자 크게', '글자 작게', '기본 크기'])
+                         ['입력 화면', '결과 화면', '', '글자 크게', '글자 작게', '기본 크기'])
 
     # --- T30 입력 편집기 ---
 
@@ -491,7 +493,7 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(w.export_all(str(out)))
         self.assertEqual((out / 'projects.yaml.bak').read_text(encoding='utf-8'), original)
         self.assertEqual(w.input_tabs.tabText(w.PROJECTS_TAB), '사업 입력')
-        self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력')
+        self.assertEqual(w.pages.tabText(w.INPUT_PAGE), '입력')
         self.assertIn('"연구 지원 사업"', (out / 'projects.yaml').read_text(encoding='utf-8'))
         self.assertTrue((out / 'people' / 'people_2027.yaml').is_file())
         # 같은 실행에서 다시 내보내도 첫 원본 백업은 그대로 둔다.
@@ -562,10 +564,10 @@ class GuiTests(unittest.TestCase):
         _, h = self.write([project()], [person()])
         w = self.window()
         self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
-        self.assertTrue(w.nav_buttons[w.INPUT_PAGE].isChecked())
+        self.assertEqual(w.pages.count(), 2)
         # 빈 입력에서 결과 화면으로 가면 바로 계산해 검증 오류를 보여 준다.
         w.show_page(w.RESULT_PAGE)
-        self.assertTrue(w.nav_buttons[w.RESULT_PAGE].isChecked())
+        self.assertEqual(w.pages.tabText(w.RESULT_PAGE), '결과')
         self.assertEqual(w.pages.currentIndex(), w.RESULT_PAGE)
         self.assertEqual(w.result_tabs.currentIndex(), w.ISSUES_TAB)
         self.assertIn('E003', [row[1] for row in self.texts(w.issue_view)])
@@ -582,7 +584,7 @@ class GuiTests(unittest.TestCase):
         # 결과 화면으로 돌아오면 고친 입력으로 다시 계산한다.
         w.show_page(w.INPUT_PAGE)
         w.people_editor.allocations.item(0, 1).setText('0.5')
-        self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력 *')
+        self.assertEqual(w.pages.tabText(w.INPUT_PAGE), '입력 *')
         w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.result_tabs.currentIndex(), w.ISSUES_TAB)
         self.assertIn('입력 화면에서 고친 뒤 결과 화면으로 돌아오세요', w.result_header.text())
@@ -591,7 +593,7 @@ class GuiTests(unittest.TestCase):
         w.show_page(w.INPUT_PAGE)
         w.people_editor.allocations.item(0, 1).setText('1')
         self.assertTrue(w.export_all(str(self.path / 'out')))
-        self.assertEqual(w.nav_buttons[w.INPUT_PAGE].text(), '✎  입력')
+        self.assertEqual(w.pages.tabText(w.INPUT_PAGE), '입력')
         w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.result_tabs.currentIndex(), w.SUMMARY_TAB)
         # 새로 만들기는 전체를 비우고 입력 화면으로 돌아간다.
@@ -1124,7 +1126,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(w.projects_sources, [str(p.resolve())])
         # 비어 있을 때는 사람 파일 폴더를 바로 위 폴더보다 먼저 찾는다.
-        fresh = MainWindow(QSettings(str(self.path / 'fresh.ini'), QSettings.IniFormat))
+        fresh = WorkspaceWindow(QSettings(str(self.path / 'fresh.ini'), QSettings.IniFormat))
         fresh.warn = lambda title, text: self.warnings.append((title, text))
         self.addCleanup(fresh.deleteLater)
         errors, _ = fresh.import_files([str(h)])

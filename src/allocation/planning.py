@@ -104,7 +104,7 @@ class _CostFlow:
 
 def _weights(priorities):
     ranks = sorted(set(priorities.values()))
-    if len(priorities) == 2 and len(ranks) == 2:
+    if len(ranks) == 2:
         return {alias: 3 if rank == ranks[0] else 2 for alias, rank in priorities.items()}
     return {alias: len(ranks) - ranks.index(rank) for alias, rank in priorities.items()}
 
@@ -197,12 +197,12 @@ def review_plan(plan: PlanningInputs):
     issues = []
     targets = {}
     for name, person in plan.people.items():
-        if person.draft_allocations is None:
+        if person.allocations is None:
             issues.append(Issue('ERROR', 'P100', f'{plan.plan_file}: {name}', '초안 없음', '초안 생성 또는 직접 입력',
                                 '선택 사업에 초안을 입력하세요.'))
-        targets[name] = {alias: (person.draft_allocations or {}).get(alias, 0)
+        targets[name] = {alias: (person.allocations or {}).get(alias, 0)
                          for alias in person.priorities}
-        if person.draft_allocations is not None:
+        if person.allocations is not None:
             absence, _ = absence_units(Person(name, person.absences, {}), plan.year, plan.plan_file)
             if sum(BASE) - sum(absence) > 0:
                 for alias, value in targets[name].items():
@@ -272,5 +272,5 @@ def generate_plan(plan: PlanningInputs):
 
 
 def _with_targets(plan, targets):
-    return replace(plan, people={name: replace(person, draft_allocations=targets[name])
+    return replace(plan, people={name: replace(person, allocations=targets[name])
                                  for name, person in plan.people.items()})

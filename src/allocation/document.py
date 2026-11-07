@@ -7,6 +7,7 @@ loading.load_inputs로 검증하므로 편집기는 계산 규칙을 따로 두�
 import io
 import json
 import re
+from copy import deepcopy
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
@@ -14,7 +15,7 @@ from datetime import date
 import yaml
 
 from .engine import absence_units
-from .loading import QUANTITY_PATTERN, Loader, parse_date
+from .loading import QUANTITY_PATTERN, Loader, migrate_plan_person, parse_date
 from .models import Person
 
 HEADER = '# 인력 배분 GUI에서 저장한 파일입니다.'
@@ -64,8 +65,9 @@ class PeopleDoc:
 @dataclass
 class PlanPersonEntry:
     name: str = ''
+    draft: dict = field(default_factory=dict)  # 사업약칭 → 참고 점수 문자열
     priorities: dict = field(default_factory=dict)  # 사업약칭 → 순위 문자열
-    draft_allocations: dict | None = None  # None은 아직 초안이 없음을 뜻한다.
+    allocations: dict | None = None  # None은 아직 결과가 없음을 뜻한다.
     absences: list = field(default_factory=list)
 
 
@@ -73,6 +75,15 @@ class PlanPersonEntry:
 class PlanDoc:
     year: str = field(default_factory=lambda: str(date.today().year))
     people: list = field(default_factory=list)
+    migrated: bool = False
+
+
+def plan_from_people(doc, year):
+    """실적 원본·휴직 날짜를 바꾸지 않고 명시적으로 새 계획을 준비한다."""
+    if not valid_year(str(year)):
+        raise DocumentError('계획 연도는 4자리 연도여야 합니다.')
+    return PlanDoc(str(year), [PlanPersonEntry(person.name, deepcopy(person.allocations),
+                                              absences=deepcopy(person.absences)) for person in doc.people])
 
 
 # --- YAML 읽기 -------------------------------------------------------------------------------
@@ -160,6 +171,8 @@ def read_people(text):
         person = PersonEntry(reader.scalar(item.get('name'), where + '.name'))
         for key, value in reader.mapping(item.get('allocations'), where + '.allocations').items():
             alias = reader.scalar(key, where + '.allocations').strip()
+            if alias in person.allocations:
+                raise DocumentError(f'{where}.allocations: 공백 제거 후 중복된 사업약칭 {alias}')
             person.allocations[alias] = reader.scalar(value, f'{where}.allocations[{alias}]').strip()
         for j, raw_absence in enumerate(reader.sequence(item.get('absences'), where + '.absences')):
             loc = f'{where}.absences[{j}]'
@@ -178,23 +191,29 @@ def read_plan(text):
         raise DocumentError('중복 또는 지원하지 않는 키: ' + ', '.join(reader.dropped))
     if root.get('stage') != 'planning':
         raise DocumentError('계획 파일은 stage: planning이어야 합니다.')
+    if type(root.get('people')) is not list:
+        raise DocumentError('people: 사람 목록이어야 합니다.')
     doc = PlanDoc(reader.scalar(root.get('year'), 'year'), [])
     for idx, raw in enumerate(reader.sequence(root.get('people'), 'people')):
         where = f'people[{idx}]'
-        item = reader.mapping(raw, where, {'name', 'priorities', 'draft_allocations', 'absences'})
+        item, migrated = migrate_plan_person(raw) if type(raw) is dict else (raw, False)
+        doc.migrated = doc.migrated or migrated
+        item = reader.mapping(item, where, {'name', 'draft', 'priorities', 'allocations', 'absences'})
+        if 'draft' not in item:
+            raise DocumentError(f'{where}.draft: 참여 사업과 참고 점수가 필요합니다.')
         person = PlanPersonEntry(reader.scalar(item.get('name'), where + '.name'))
-        for key, value in reader.mapping(item.get('priorities'), where + '.priorities').items():
-            alias = reader.scalar(key, where + '.priorities').strip()
-            if alias in person.priorities:
-                raise DocumentError(f'{where}.priorities: 공백 제거 후 중복된 사업약칭 {alias}')
-            person.priorities[alias] = reader.scalar(value, f'{where}.priorities[{alias}]').strip()
-        if 'draft_allocations' in item:
-            person.draft_allocations = {}
-            for key, value in reader.mapping(item['draft_allocations'], where + '.draft_allocations').items():
-                alias = reader.scalar(key, where + '.draft_allocations').strip()
-                if alias in person.draft_allocations:
-                    raise DocumentError(f'{where}.draft_allocations: 공백 제거 후 중복된 사업약칭 {alias}')
-                person.draft_allocations[alias] = reader.scalar(value, f'{where}.draft_allocations[{alias}]').strip()
+        for field_name in ('draft', 'priorities', 'allocations'):
+            if field_name == 'allocations' and field_name not in item:
+                continue
+            if field_name in item and type(item[field_name]) is not dict:
+                raise DocumentError(f'{where}.{field_name}: 항목 묶음(mapping)이어야 합니다.')
+            values = {}
+            for key, value in reader.mapping(item.get(field_name), where + '.' + field_name).items():
+                alias = reader.scalar(key, where + '.' + field_name).strip()
+                if alias in values:
+                    raise DocumentError(f'{where}.{field_name}: 공백 제거 후 중복된 사업약칭 {alias}')
+                values[alias] = reader.scalar(value, f'{where}.{field_name}[{alias}]').strip()
+            setattr(person, field_name, values)
         for j, raw_absence in enumerate(reader.sequence(item.get('absences'), where + '.absences')):
             loc = f'{where}.absences[{j}]'
             absence = reader.mapping(raw_absence, loc, {'period', 'reason'})
@@ -291,19 +310,14 @@ def dump_plan(doc):
                 lines.append(f'      - period: {_text(f"{absence.start.strip()}~{absence.end.strip()}")}')
                 if absence.reason:
                     lines.append(f'        reason: {_text(absence.reason)}')
-        if person.priorities:
-            lines.append('    priorities:')
-            for alias, rank in person.priorities.items():
-                lines.append(f'      {_text(alias)}: {_integer(rank)}')
-        else:
-            lines.append('    priorities: {}')
-        if person.draft_allocations is not None:
-            if person.draft_allocations:
-                lines.append('    draft_allocations:')
-                for alias, value in person.draft_allocations.items():
-                    lines.append(f'      {_text(alias)}: {_text(value.strip())}')
-            else:
-                lines.append('    draft_allocations: {}')
+        for key, values in (('draft', person.draft), ('priorities', person.priorities),
+                            ('allocations', person.allocations)):
+            if values is None or key == 'priorities' and not values:
+                continue
+            lines.append(f'    {key}:' if values else f'    {key}: {{}}')
+            for alias, value in values.items():
+                rendered = _integer(value) if key == 'priorities' else _text(value.strip())
+                lines.append(f'      {_text(alias)}: {rendered}')
     return '\n'.join(lines) + '\n'
 
 

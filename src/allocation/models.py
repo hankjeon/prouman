@@ -48,7 +48,8 @@ class PlanPerson:
     name: str
     absences: tuple[tuple[date, date], ...]
     priorities: dict[str, int]
-    draft_allocations: dict[str, int] | None
+    allocations: dict[str, int] | None
+    draft: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

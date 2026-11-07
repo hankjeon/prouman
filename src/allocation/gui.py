@@ -8,19 +8,20 @@ from pathlib import Path
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt,
                             qInstallMessageHandler)
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog,
                                QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton,
-                               QSizePolicy, QSplitter, QStackedWidget, QTableView, QTabWidget, QToolButton,
+                               QSplitter, QStackedWidget, QTableView, QTabWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
 from . import theme
 from .document import (DocumentError, PeopleDoc, PlanDoc, detect_kind, dump_people, dump_plan, dump_projects,
-                       read_people, read_plan, read_projects, valid_year)
+                       plan_from_people, read_people, read_plan, read_projects, valid_year)
 from .editor import PeopleEditor, ProjectEditor, SelectionDelegate
 from .engine import calculate
 from .loading import decode_text, load_inputs
 from .models import amount
 from .planning_gui import PlanningPage
+from .storage import write_bundle
 from .rendering import issue_counts, project_summary
 from .tables import (issue_table, people_summary_table, person_detail_table, project_people_table,
                      project_summary_table)
@@ -135,17 +136,18 @@ def find_projects_file(people_path):
     return None
 
 
-class MainWindow(QMainWindow):
+class WorkspaceWindow(QMainWindow):
     """왼쪽 메뉴로 입력 화면(파일·표 편집)과 결과 화면(계산 결과·엑셀 저장)을 바꾼다.
 
     결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
 
-    INPUT_PAGE, RESULT_PAGE, PLAN_PAGE = 0, 1, 2
+    INPUT_PAGE, RESULT_PAGE = 0, 1
     PROJECTS_TAB, PEOPLE_TAB, OVERVIEW_TAB = 0, 1, 2  # input_tabs
     ISSUES_TAB, SUMMARY_TAB = 0, 1  # result_tabs
 
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, planning=False):
         super().__init__()
+        self.planning = planning
         self.settings = settings if settings is not None else QSettings('prouman', 'prouman')
         self.result = None
         self.issues = []
@@ -177,6 +179,13 @@ class MainWindow(QMainWindow):
         files_row.addWidget(import_button)
         files_row.addWidget(export_button)
         files_row.addWidget(new_button)
+        if planning:
+            save_button = QPushButton('저장 — 중간 저장')
+            save_button.clicked.connect(self.browse_save_plan)
+            prepare_button = QPushButton('실적 파일에서 계획 준비')
+            prepare_button.clicked.connect(self.browse_prepare_plan)
+            files_row.addWidget(save_button)
+            files_row.addWidget(prepare_button)
         files_row.addStretch()
         files_row.addWidget(self.projects_label)
         self.year_combo = QComboBox()
@@ -207,13 +216,15 @@ class MainWindow(QMainWindow):
         self.people_editor.changed.connect(self.people_changed)
         self.input_tabs = QTabWidget()
         self.input_tabs.addTab(self.project_editor, '사업 입력')
-        self.input_tabs.addTab(self.people_editor, '사람 입력')
-        self.input_tabs.addTab(self.people_editor.overview, '종합')
+        if planning:
+            self.input_tabs.addTab(self.planning_page.input_widget, '사람 입력')
+        else:
+            self.input_tabs.addTab(self.people_editor, '사람 입력')
+            self.input_tabs.addTab(self.people_editor.overview, '종합')
         self.people_editor.overview.person_requested.connect(self.open_person)
         input_page = QWidget()
         layout = QVBoxLayout(input_page)
         layout.addLayout(files_row)
-        layout.addLayout(year_row)
         layout.addWidget(self.input_tabs)
 
         # 결과 화면: 머리 줄(계산 정보·엑셀 저장), 결과 탭
@@ -267,38 +278,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
         layout.addWidget(self.result_tabs)
 
-        # 왼쪽 메뉴와 화면 전환
-        self.pages = QStackedWidget()
-        self.pages.addWidget(input_page)
-        self.pages.addWidget(result_page)
-        self.pages.addWidget(self.planning_page)
-        nav = QFrame()
-        nav.setObjectName('nav')
-        # 밝은 회색 고정은 다크 테마에서 따로 논다. 팔레트에서 뽑은 값으로 맞춘다.
-        nav.setStyleSheet(theme.nav_stylesheet())
-        self.nav = nav
-        nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(4, 8, 4, 8)
-        self.nav_group = QButtonGroup(self)
-        self.nav_buttons = []
-        for page, text in ((self.INPUT_PAGE, '✎  입력'), (self.RESULT_PAGE, '▦  결과'),
-                           (self.PLAN_PAGE, '▤  계획')):
-            button = QToolButton()
-            button.setText(text)
-            button.setCheckable(True)
-            button.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            button.clicked.connect(lambda checked=False, page=page: self.show_page(page))
-            self.nav_group.addButton(button, page)
-            self.nav_buttons.append(button)
-            nav_layout.addWidget(button)
-        nav_layout.addStretch()
-        nav.setMinimumWidth(110)
+        # 각 업무는 입력·결과 두 탭만 사용한다. 작업 모드 전환은 바깥 창이 맡는다.
+        self.pages = QTabWidget()
+        self.pages.addTab(input_page, '입력')
+        self.pages.addTab(self.planning_page if planning else result_page, '결과')
+        if planning:
+            result_page.setParent(self)
+            result_page.hide()
+            self.people_editor.setParent(self)
+            self.people_editor.hide()
+        else:
+            self.planning_page.setParent(self)
+            self.planning_page.hide()
+            self.planning_page.input_widget.setParent(self)
+            self.planning_page.input_widget.hide()
+        self.pages.currentChanged.connect(self.show_page)
         central = QWidget()
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(nav)
+        layout = QVBoxLayout(central)
+        layout.addLayout(year_row)
         layout.addWidget(self.pages, 1)
         self.setCentralWidget(central)
 
@@ -314,7 +311,7 @@ class MainWindow(QMainWindow):
             file_menu.addAction(action)
         view_menu = self.menuBar().addMenu('보기')
         for page, text, key in ((self.INPUT_PAGE, '입력 화면', 'Ctrl+1'),
-                                (self.RESULT_PAGE, '결과 화면', 'Ctrl+2'), (self.PLAN_PAGE, '계획 화면', 'Ctrl+3')):
+                                (self.RESULT_PAGE, '결과 화면', 'Ctrl+2')):
             action = QAction(text, self)
             action.setShortcut(QKeySequence(key))
             action.triggered.connect(lambda checked=False, page=page: self.show_page(page))
@@ -341,7 +338,7 @@ class MainWindow(QMainWindow):
     def ask_export(self, desc):
         """내보내지 않은 변경이 있을 때 'export' / 'discard' / 'cancel'을 돌려준다."""
         answer = QMessageBox.question(
-            self, '내보내지 않은 변경', f'{desc}에 내보내지 않은 변경이 있습니다. 내보낼까요?',
+            self, '저장하지 않은 변경', f'{desc}에 저장하지 않은 변경이 있습니다. 저장할까요?',
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
         return {QMessageBox.Save: 'export', QMessageBox.Discard: 'discard'}.get(answer, 'cancel')
 
@@ -382,13 +379,14 @@ class MainWindow(QMainWindow):
 
     def show_page(self, page):
         """결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
-        if page == self.RESULT_PAGE:
+        if page == self.RESULT_PAGE and not self.planning:
             self.generate()
             return
-        if page == self.PLAN_PAGE:
+        if self.planning and page == self.RESULT_PAGE:
             self.planning_page.refresh_review()
+        self.pages.blockSignals(True)
         self.pages.setCurrentIndex(page)
-        self.nav_buttons[page].setChecked(True)
+        self.pages.blockSignals(False)
 
     def show_result_header(self, extra=''):
         if self.generated_at is None:
@@ -402,7 +400,6 @@ class MainWindow(QMainWindow):
 
     def apply_theme_styles(self):
         """시스템 테마가 바뀌면 메뉴·결과 표 색을 다시 칠한다."""
-        self.nav.setStyleSheet(theme.nav_stylesheet())
         self.project_editor.apply_theme()
         self.people_editor.apply_theme()
         self.planning_page.refresh_review()
@@ -442,9 +439,8 @@ class MainWindow(QMainWindow):
         self.input_tabs.setTabText(self.PROJECTS_TAB, '사업 입력' + (' *' if self.projects_dirty else ''))
         any_people = any(self.people_dirty.values())
         any_plan = any(self.plan_dirty.values())
-        self.input_tabs.setTabText(self.PEOPLE_TAB, '사람 입력' + (' *' if any_people else ''))
-        self.nav_buttons[self.INPUT_PAGE].setText('✎  입력' + (' *' if self.projects_dirty or any_people else ''))
-        self.nav_buttons[self.PLAN_PAGE].setText('▤  계획' + (' *' if any_plan else ''))
+        self.input_tabs.setTabText(self.PEOPLE_TAB, '사람 입력' + (' *' if (any_plan if self.planning else any_people) else ''))
+        self.pages.setTabText(self.INPUT_PAGE, '입력' + (' *' if self.projects_dirty or (any_plan if self.planning else any_people) else ''))
         self.refresh_year_combo()
         self.refresh_projects_label()
 
@@ -482,12 +478,13 @@ class MainWindow(QMainWindow):
         for year, doc in self.plan_docs.items():
             changed = False
             for person in doc.people:
-                if old in person.priorities:
+                if old in person.draft or old in person.priorities or old in (person.allocations or {}):
+                    person.draft = {new if key == old else key: value for key, value in person.draft.items()}
                     person.priorities = {new if key == old else key: value
                                          for key, value in person.priorities.items()}
-                    if person.draft_allocations is not None:
-                        person.draft_allocations = {new if key == old else key: value
-                                                    for key, value in person.draft_allocations.items()}
+                    if person.allocations is not None:
+                        person.allocations = {new if key == old else key: value
+                                              for key, value in person.allocations.items()}
                     changed = True
             if changed:
                 self.plan_dirty[year] = True
@@ -502,10 +499,11 @@ class MainWindow(QMainWindow):
         for year, doc in self.plan_docs.items():
             changed = False
             for person in doc.people:
-                if alias in person.priorities:
-                    person.priorities.pop(alias)
-                    if person.draft_allocations is not None:
-                        person.draft_allocations.pop(alias, None)
+                if alias in person.draft or alias in person.priorities or alias in (person.allocations or {}):
+                    person.priorities.pop(alias, None)
+                    person.draft.pop(alias, None)
+                    if person.allocations is not None:
+                        person.allocations.pop(alias, None)
                     changed = True
             if changed:
                 self.plan_dirty[year] = True
@@ -514,7 +512,7 @@ class MainWindow(QMainWindow):
 
     def allow_remove_project(self, project):
         count = sum(self.people_editor.count_alias(project.alias, doc) for doc in self.people_docs.values())
-        plan_count = sum(project.alias in person.priorities for doc in self.plan_docs.values() for person in doc.people)
+        plan_count = sum(project.alias in person.draft for doc in self.plan_docs.values() for person in doc.people)
         name = project.name or project.alias or '(이름 없음)'
         text = f'사업 "{name}"을(를) 삭제할까요?'
         if count:
@@ -538,6 +536,13 @@ class MainWindow(QMainWindow):
             return True
         if answer != 'export':
             return False
+        if self.planning:
+            for year in sorted(self.plan_docs):
+                if self.projects_dirty or self.plan_dirty.get(year):
+                    self.select_year(year)
+                    if not self.browse_save_plan():
+                        return False
+            return True
         if (self.projects_dirty or any(self.people_dirty.values())) and not self.browse_export():
             return False
         return not any(self.plan_dirty.values()) or self.browse_save_plan()
@@ -575,6 +580,48 @@ class MainWindow(QMainWindow):
             self.settings.setValue('import_folder', str(Path(paths[0]).parent))
             self.run_import(paths)
 
+    def browse_prepare_plan(self):
+        """명시적인 명령으로만 실적 사람 파일을 새 계획 참고값으로 변환한다."""
+        path, _ = QFileDialog.getOpenFileName(self, '계획의 참고 자료로 사용할 실적 사람 파일',
+                                             self.start_folder('import'), YAML_FILTER)
+        if not path:
+            return False
+        try:
+            doc, dropped = read_people(decode_text(Path(path).read_bytes()))
+            if dropped:
+                raise DocumentError('지원하지 않는 항목이 있어 변환하지 않았습니다: ' + ', '.join(dropped))
+            year, ok = QInputDialog.getText(self, '계획 연도', '새 계획 연도 (휴직 날짜는 자동 이동하지 않습니다):',
+                                            text=str(int(doc.year) + 1) if valid_year(doc.year) else '')
+            if not ok:
+                return False
+            return self.prepare_plan(doc, year)
+        except (OSError, UnicodeError, DocumentError) as exc:
+            self.warn('계획 준비 실패', str(exc))
+            return False
+
+    def prepare_plan(self, people, year):
+        if not self.planning:
+            return False
+        try:
+            doc = plan_from_people(people, str(year).strip())
+        except DocumentError as exc:
+            self.warn('계획 준비 실패', str(exc))
+            return False
+        if doc.year in self.plan_docs and self.plan_docs[doc.year].people:
+            if not self.confirm('계획 교체', f'{doc.year}년의 현재 계획을 새 참고 자료로 바꿀까요?'):
+                return False
+        self.people_docs.setdefault(doc.year, PeopleDoc(doc.year, []))
+        self.people_dirty.setdefault(doc.year, False)
+        self.people_sources.setdefault(doc.year, [])
+        self.plan_docs[doc.year] = doc
+        self.plan_sources[doc.year] = ''
+        self.plan_dirty[doc.year] = True
+        self.select_year(doc.year)
+        self.show_page(self.INPUT_PAGE)
+        self.input_tabs.setCurrentIndex(self.PEOPLE_TAB)
+        self.statusBar().showMessage('실적 할당값을 참고 점수로 복사했습니다. 사업 조건과 휴직 날짜를 확인하세요.')
+        return True
+
     def run_import(self, paths):
         """불러온 뒤 실패·지원 외 항목을 모아 한 번씩만 알린다."""
         errors, dropped = self.import_files(paths)
@@ -587,13 +634,17 @@ class MainWindow(QMainWindow):
 
     def import_files(self, paths):
         """파일을 추가로 불러온다. 성공한 것만 반영하고 (실패 설명, 지원 외 항목)을 돌려준다."""
-        errors, dropped, imported_people = [], [], []
+        errors, dropped, imported_people, migrated = [], [], [], []
         for path in paths:
             try:
                 text = decode_text(Path(path).read_bytes())
                 kind = detect_kind(text)
                 if kind is None:
                     raise DocumentError('사업 파일도 사람 파일도 아닙니다.')
+                if kind == 'plan' and not self.planning:
+                    raise DocumentError('계획 파일은 상단의 계획작업 모드에서 불러오세요.')
+                if kind == 'people' and self.planning:
+                    raise DocumentError('실적 파일은 「실적 파일에서 계획 준비」로 새 연도를 지정해 가져오세요.')
                 if kind == 'projects':
                     document, file_dropped = read_projects(text)
                 elif kind == 'plan':
@@ -630,7 +681,9 @@ class MainWindow(QMainWindow):
                     errors.append(f'{Path(path).name}: {year}년 계획이 이미 열려 있습니다.')
                     continue
                 self.plan_docs[year] = document
-                self.plan_dirty[year] = False
+                self.plan_dirty[year] = document.migrated
+                if document.migrated:
+                    migrated.append(Path(path).name)
                 self.plan_sources[year] = str(path)
                 if year not in self.people_docs:
                     self.people_docs[year] = PeopleDoc(year, [])
@@ -675,7 +728,10 @@ class MainWindow(QMainWindow):
                 errors.extend(sub_errors)
                 dropped.extend(sub_dropped)
         if not errors:
-            self.statusBar().showMessage('불러오기: ' + ', '.join(Path(p).name for p in paths))
+            message = '불러오기: ' + ', '.join(Path(p).name for p in paths)
+            if migrated:
+                message += ' · 이전 계획 형식 변환 (참고점수 0, 결과·순위 보존): ' + ', '.join(migrated)
+            self.statusBar().showMessage(message)
         return errors, dropped
 
     def select_year(self, year):
@@ -786,6 +842,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('새로 만들기: 빈 입력으로 시작합니다.')
 
     def browse_export(self):
+        if self.planning:
+            return self.browse_confirm_plan()
         folder = self.ask_export_folder()
         if not folder:
             return False
@@ -795,33 +853,31 @@ class MainWindow(QMainWindow):
         folder = self.ask_export_folder()
         return bool(folder) and self.save_plan(folder)
 
-    def _write_backup_file(self, path, text):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        key = str(path.resolve())
-        if path.exists() and key not in self.backed_up:
-            shutil.copy2(path, path.with_name(path.name + '.bak'))
-            self.backed_up.add(key)
-        path.write_text(text, encoding='utf-8')
-
     def save_plan(self, folder):
         """오류가 남은 수동 초안도 별도 계획 파일에 보존한다."""
         if not self.flush_year_edit():
             return False
         target = Path(folder)
         plan_path = target / 'plans' / f'plan_{self.current_year}.yaml'
+        previous_sources = set(self.projects_sources)
+        previous_sources.add(self.plan_sources.get(self.current_year, ''))
         try:
-            self._write_backup_file(target / 'projects.yaml', dump_projects(self.project_editor.projects))
-            self._write_backup_file(plan_path, dump_plan(self.plan_docs[self.current_year]))
+            write_bundle([(target / 'projects.yaml', dump_projects(self.project_editor.projects)),
+                          (plan_path, dump_plan(self.plan_docs[self.current_year]))], self.backed_up)
         except OSError as exc:
             self.warn('계획 저장 실패', f'{plan_path}\n{exc.strerror or exc}')
             return False
         self.plan_sources[self.current_year] = str(plan_path)
         self.planning_page.plan_path = str(plan_path)
         self.plan_dirty[self.current_year] = False
+        self.plan_docs[self.current_year].migrated = False
+        self.projects_sources = [str(target / 'projects.yaml')]
         self.set_projects_dirty(False)
-        if str(plan_path) not in self.loaded_files:
-            self.loaded_files.append(str(plan_path))
-            self.settings.setValue('loaded_files', self.loaded_files)
+        self.loaded_files = [path for path in self.loaded_files if path not in previous_sources]
+        for path in (str(target / 'projects.yaml'), str(plan_path)):
+            if path not in self.loaded_files:
+                self.loaded_files.append(path)
+        self.settings.setValue('loaded_files', self.loaded_files)
         self.settings.setValue('export_folder', str(folder))
         self.refresh_marks()
         self.statusBar().showMessage(f'계획 저장: {plan_path}')
@@ -848,22 +904,21 @@ class MainWindow(QMainWindow):
         if result is None or result.has_errors:
             self.warn('확정 불가', '확정 사람 파일의 월별 검증을 통과하지 못했습니다.')
             return False
-        if not self.save_plan(folder):
-            return False
         path = Path(folder) / 'people' / f'people_{self.current_year}.yaml'
+        project_path = Path(folder) / 'projects.yaml'
+        protected = {Path(p).resolve() for p in self.projects_sources + list(self.plan_sources.values()) if p}
+        protected.update(Path(p).resolve() for sources in self.people_sources.values() for p in sources)
+        protected.update(Path(p).resolve() for p in getattr(self, 'protected_paths', lambda: [])())
+        if project_path.resolve() in protected or path.resolve() in protected:
+            self.warn('별도 폴더 필요', '계획 작업 자료·불러온 원본과 다른 폴더로 내보내세요.')
+            return False
         try:
-            self._write_backup_file(path, dump_people(doc))
+            write_bundle([(project_path, dump_projects(self.project_editor.projects)),
+                          (path, dump_people(doc))], self.backed_up)
         except OSError as exc:
             self.warn('확정 파일 저장 실패', f'{path}\n{exc.strerror or exc}')
             return False
-        self.people_docs[self.current_year] = doc
-        self.people_sources[self.current_year] = [str(path)]
-        self.people_dirty[self.current_year] = False
-        self.people_editor.set_doc(doc)
-        if str(path) not in self.loaded_files:
-            self.loaded_files.append(str(path))
-            self.settings.setValue('loaded_files', self.loaded_files)
-        self.refresh_marks()
+        self.settings.setValue('export_folder', str(folder))
         self.statusBar().showMessage(f'확정 파일 생성: {path}')
         return True
 
@@ -954,8 +1009,9 @@ class MainWindow(QMainWindow):
         self.excel_button.setEnabled(False)
         self.clear_results()
         self.issue_view.show_table([], [])
+        self.pages.blockSignals(True)
         self.pages.setCurrentIndex(self.RESULT_PAGE)
-        self.nav_buttons[self.RESULT_PAGE].setChecked(True)
+        self.pages.blockSignals(False)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             inputs, issues = load_inputs(
@@ -1026,6 +1082,149 @@ class MainWindow(QMainWindow):
             return False
         self.statusBar().showMessage(f'엑셀 저장: {path}')
         return True
+
+
+class _ModeSettings:
+    """같은 설정 저장소 안에서도 작업별 파일·연도를 분리한다."""
+    def __init__(self, settings, prefix):
+        self.settings, self.prefix = settings, prefix + '/'
+
+    def value(self, key, default=None, **options):
+        fallback = self.settings.value('font_size', default, **options) if key == 'font_size' else default
+        return self.settings.value(self.prefix + key, fallback, **options)
+
+    def setValue(self, key, value):
+        self.settings.setValue(self.prefix + key, value)
+
+    def remove(self, key):
+        self.settings.remove(self.prefix + key)
+
+
+class MainWindow(QMainWindow):
+    """서로 독립된 사업·사람 문서를 갖는 실적작업·계획작업의 공통 창."""
+    ACTUAL, PLANNING = 0, 1
+
+    def __init__(self, settings=None):
+        super().__init__()
+        self.settings = settings if settings is not None else QSettings('prouman', 'prouman')
+        self._migrate_settings()
+        self.workspaces = [WorkspaceWindow(_ModeSettings(self.settings, 'actual')),
+                           WorkspaceWindow(_ModeSettings(self.settings, 'planning'), planning=True)]
+        self.actual, self.plan = self.workspaces
+        self.mode_stack = QStackedWidget()
+        row = QHBoxLayout()
+        row.addWidget(QLabel('작업 선택'))
+        self.mode_group = QButtonGroup(self)
+        self.mode_buttons = []
+        for index, label in enumerate(('실적작업', '계획작업')):
+            button = QToolButton()
+            button.setText(label)
+            button.setCheckable(True)
+            button.clicked.connect(lambda checked=False, index=index: self.set_mode(index))
+            self.mode_group.addButton(button, index)
+            self.mode_buttons.append(button)
+            row.addWidget(button)
+        row.addStretch()
+        for workspace in self.workspaces:
+            workspace.menuBar().hide()
+            for action in workspace.findChildren(QAction):
+                action.setShortcuts([])
+            workspace.setWindowFlags(Qt.Widget)
+            workspace.protected_paths = self.open_source_paths
+            self.mode_stack.addWidget(workspace)
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.addLayout(row)
+        layout.addWidget(self.mode_stack)
+        self.setCentralWidget(central)
+        file_menu = self.menuBar().addMenu('파일')
+        for label, key, callback in (
+                ('새로 만들기', QKeySequence.New, lambda: self.active_workspace.new_all()),
+                ('불러오기', QKeySequence.Open, lambda: self.active_workspace.browse_import()),
+                ('저장', QKeySequence.Save, self.save_current),
+                ('내보내기', 'Ctrl+Shift+S', lambda: self.active_workspace.browse_export()),
+                ('종료', QKeySequence.Quit, self.close)):
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(key))
+            action.triggered.connect(lambda checked=False, callback=callback: callback())
+            file_menu.addAction(action)
+        mode_menu = self.menuBar().addMenu('작업')
+        for index, label in enumerate(('실적작업', '계획작업')):
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(f'Ctrl+Alt+{index + 1}'))
+            action.triggered.connect(lambda checked=False, index=index: self.set_mode(index))
+            mode_menu.addAction(action)
+        view_menu = self.menuBar().addMenu('보기')
+        for page, label in enumerate(('입력', '결과')):
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(f'Ctrl+{page + 1}'))
+            action.triggered.connect(lambda checked=False, page=page: self.active_workspace.show_page(page))
+            view_menu.addAction(action)
+        view_menu.addSeparator()
+        for label, keys, step in (('글자 크게', ['Ctrl++', 'Ctrl+='], 1),
+                                  ('글자 작게', ['Ctrl+-'], -1), ('기본 크기', ['Ctrl+0'], 0)):
+            action = QAction(label, self)
+            action.setShortcuts([QKeySequence(key) for key in keys])
+            action.triggered.connect(lambda checked=False, step=step: self.change_font_size(step))
+            view_menu.addAction(action)
+        self.resize(1280, 850)
+        self.set_mode(self.settings.value('work_mode', self.ACTUAL, type=int))
+
+    @property
+    def active_workspace(self):
+        return self.workspaces[self.mode_stack.currentIndex()]
+
+    def set_mode(self, mode):
+        mode = mode if mode in (self.ACTUAL, self.PLANNING) else self.ACTUAL
+        self.mode_stack.setCurrentIndex(mode)
+        self.mode_buttons[mode].setChecked(True)
+        self.setWindowTitle('인력 배분 — ' + ('계획작업' if mode else '실적작업'))
+        self.settings.setValue('work_mode', mode)
+
+    def save_current(self):
+        workspace = self.active_workspace
+        return workspace.browse_save_plan() if workspace.planning else workspace.browse_export()
+
+    def change_font_size(self, step):
+        size = self.active_workspace.font_size + step if step else DEFAULT_FONT_SIZE
+        for workspace in self.workspaces:
+            workspace.set_font_size(size)
+
+    def open_source_paths(self):
+        return [path for workspace in self.workspaces
+                for path in workspace.projects_sources + list(workspace.plan_sources.values())
+                + [p for sources in workspace.people_sources.values() for p in sources] if path]
+
+    def _migrate_settings(self):
+        if self.settings.value('actual/loaded_files', None) is not None:
+            return
+        files = self.settings.value('loaded_files', None)
+        if files is None:
+            files = [path for kind in KINDS
+                     if (path := self.settings.value(f'{kind}_file', '', type=str)) and Path(path).is_file()]
+        kinds = {}
+        for path in files or []:
+            try:
+                kinds[path] = detect_kind(decode_text(Path(path).read_bytes()))
+            except (OSError, UnicodeError, DocumentError):
+                continue
+        has_plan = 'plan' in kinds.values()
+        self.settings.setValue('actual/loaded_files', [p for p, kind in kinds.items() if kind in ('projects', 'people')])
+        self.settings.setValue('planning/loaded_files', [p for p, kind in kinds.items()
+                                                        if has_plan and kind in ('projects', 'plan')])
+        wanted = self.settings.value('current_year', '', type=str)
+        for prefix in ('actual', 'planning'):
+            self.settings.setValue(prefix + '/current_year', wanted)
+
+    def closeEvent(self, event):
+        original = self.mode_stack.currentIndex()
+        for index, workspace in enumerate(self.workspaces):
+            self.set_mode(index)
+            if not workspace.keep_all('계획작업' if workspace.planning else '실적작업'):
+                event.ignore()
+                return
+        self.set_mode(original)
+        event.accept()
 
 
 WAYLAND_NOISE = (
