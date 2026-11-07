@@ -16,7 +16,8 @@ if importlib.util.find_spec('PySide6') is None:
 else:
     from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
     from PySide6.QtGui import QGuiApplication
-    from PySide6.QtWidgets import QApplication, QComboBox
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QComboBox, QStyle, QStyleOptionSlider
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -24,7 +25,7 @@ sys.path.insert(0, str(ROOT / 'tests'))
 
 from test_allocation import person, project
 
-from allocation.document import ProjectEntry
+from allocation.document import ProjectEntry, YearEntry
 from allocation.loading import load_inputs
 
 if QApplication is not None:
@@ -59,6 +60,74 @@ class GuiTests(unittest.TestCase):
         window.ask_year = lambda: self.year_answers.pop(0) if self.year_answers else ''
         self.addCleanup(window.deleteLater)
         return window
+
+    def test_file_menu_order_and_exit_uses_close_confirmation(self):
+        w = self.window()
+        menus = {action.text(): action.menu() for action in w.menuBar().actions()}
+        actions = menus['파일'].actions()
+        self.assertEqual([action.text() for action in actions],
+                         ['새로 만들기', '불러오기', '내보내기', '종료'])
+        w.show()
+        w.keep_all = lambda: False
+        actions[-1].trigger()
+        self.assertTrue(w.isVisible())
+        w.keep_all = lambda: True
+        actions[-1].trigger()
+        self.assertFalse(w.isVisible())
+
+    def test_P08_P09_P10_plan_screen_save_reopen_confirm(self):
+        from allocation.document import PlanDoc, PlanPersonEntry, dump_plan
+        from allocation.engine import calculate
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QMessageBox
+
+        project_path = self.path / 'projects.yaml'
+        project_path.write_text(yaml.safe_dump({'projects': [project('사업1', limit='1'),
+                                                             project('사업2', limit='1')]},
+                                               allow_unicode=True), encoding='utf-8')
+        plan_path = self.path / 'plans' / 'plan_2027.yaml'
+        plan_path.parent.mkdir()
+        plan_path.write_text(dump_plan(PlanDoc('2027',
+            [PlanPersonEntry('홍길동', {'사업1': '1', '사업2': '2'})])), encoding='utf-8')
+        w = self.window()
+        errors, _ = w.import_files([str(project_path), str(plan_path)])
+        self.assertEqual(errors, [])
+        w.show_page(w.PLAN_PAGE)
+        self.assertEqual(w.pages.currentIndex(), w.PLAN_PAGE)
+        self.assertTrue(w.planning_page.generate())
+        self.assertEqual(w.planning_page.matrix.item(0, 1).text(), '0.60000')
+        self.assertEqual(w.planning_page.matrix.item(0, 2).text(), '0.40000')
+        w.planning_page.matrix.item(0, 1).setText('0.70000')
+        self.assertEqual(w.planning_page.matrix.item(0, 2).text(), '0.40000')
+        self.assertFalse(w.planning_page.confirm_button.isEnabled())
+        self.assertTrue(w.save_plan(self.path))
+        self.assertIn('0.70000', plan_path.read_text(encoding='utf-8'))
+        self.assertFalse(w.confirm_plan(self.path))
+        self.assertFalse((self.path / 'people' / 'people_2027.yaml').exists())
+
+        second = self.window()
+        self.assertEqual(second.planning_page.doc.people[0].draft_allocations['사업1'], '0.70000')
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.No):
+            self.assertFalse(second.planning_page.generate())
+        self.assertEqual(second.planning_page.doc.people[0].draft_allocations['사업1'], '0.70000')
+        second.planning_page.matrix.item(0, 1).setText('0.60000')
+        self.assertTrue(second.planning_page.confirm_button.isEnabled())
+        self.assertTrue(second.confirm_plan(self.path))
+        confirmed = self.path / 'people' / 'people_2027.yaml'
+        self.assertIn('stage: confirmed', confirmed.read_text(encoding='utf-8'))
+        self.assertIn('0.60000', plan_path.read_text(encoding='utf-8'))
+        inputs, issues = load_inputs(project_path, confirmed)
+        self.assertIsNotNone(inputs, issues)
+        self.assertFalse(calculate(inputs, issues).has_errors)
+
+    def test_plan_empty_people_still_shows_project_limit(self):
+        w = self.window()
+        year = w.current_year
+        w.project_editor.set_projects([ProjectEntry('사업1', '사업1', f'{year}-01-01', f'{year}-12-31',
+                                                    [YearEntry(year, '1.5')])])
+        w.show_page(w.PLAN_PAGE)
+        self.assertEqual(w.planning_page.matrix.item(1, 1).text(), '1.50000')
+        self.assertEqual(w.planning_page.matrix.item(2, 1).text(), '1.50000')
 
     def write(self, projects, people, year=2027):
         p, h = self.path / 'projects.yaml', self.path / 'people' / 'people.yaml'
@@ -244,7 +313,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.font().pointSize(), DEFAULT_FONT_SIZE)
         menus = {a.text(): a.menu() for a in w.menuBar().actions()}
         self.assertEqual([a.text() for a in menus['보기'].actions()],
-                         ['입력 화면', '결과 화면', '', '글자 크게', '글자 작게', '기본 크기'])
+                         ['입력 화면', '결과 화면', '계획 화면', '', '글자 크게', '글자 작게', '기본 크기'])
 
     # --- T30 입력 편집기 ---
 
@@ -368,14 +437,14 @@ class GuiTests(unittest.TestCase):
         table.item(1, 3).setText('2026-12-31')
         self.assertIn('시작일', table.item(1, 3).toolTip())
         table.item(1, 3).setText('2027-12-31')
-        # 연도 표: 관리 연도 2027이면 2025~2030, 제외월 열은 2027.
-        grid.setCurrentCell(1, 2)
+        # 배정이 2027에만 있으면 관리 연도는 중앙의 네 번째 열이다.
+        grid.setCurrentCell(1, 3)
         grid.item(1, 6).setText('4, 13')
         self.assertTrue(grid.item(1, 6).toolTip())
         grid.item(1, 6).setText('4, 5, 6')
-        grid.item(1, 3).setText('1')
+        grid.item(1, 4).setText('1')
         self.assertEqual([e.year for e in w.project_editor.projects[1].years], ['2027', '2028'])
-        grid.item(1, 3).setText('')
+        grid.item(1, 4).setText('')
         self.assertEqual([(e.year, e.excluded) for e in w.project_editor.projects[1].years], [('2027', '4, 5, 6')])
         # 사업2를 4~6월 제외하면 사업1(연구)이 그 달을 채운다.
         w.generate()
@@ -439,7 +508,7 @@ class GuiTests(unittest.TestCase):
         for column, value in enumerate(['새 사업', '새사업', '2026-01-01', '2026-12-31']):
             pe.table.item(0, column).setText(value)
         me.year_edited('2026')
-        pe.grid.item(0, 2).setText('2')  # 관리 연도 2026 → 2024~2029의 세 번째 열
+        pe.grid.item(0, 3).setText('2')  # 관리 연도 2026 → 2023~2028의 네 번째 열
         me.add_person()
         self.assertEqual(me.doc.people[0].name, '새 사람')
         me.people_list.item(0).setText('이영희')
@@ -544,6 +613,29 @@ class GuiTests(unittest.TestCase):
         g = w.project_editor.grid
         return [[g.item(r, c).text() for c in range(g.columnCount())] for r in range(g.rowCount())]
 
+    def test_initial_years_show_content_before_centering(self):
+        from allocation.editor import ProjectEditor
+
+        pe = ProjectEditor()
+        self.addCleanup(pe.deleteLater)
+        pe.managed_year = lambda: '2026'
+        entries = [YearEntry(str(year), '1') for year in range(2024, 2028)]
+        pe.set_projects([ProjectEntry('사업', '사업', '2024-01-01', '2027-12-31', entries)])
+        self.assertEqual(pe.years_shown(), list(range(2023, 2029)))
+        self.assertEqual(pe.excluded_year, 2026)
+        self.assertTrue(pe.grid.horizontalHeaderItem(3).font().bold())
+
+        # 6년 안에 모든 배정 연도가 들어오면 관리 연도의 중앙 배치보다 먼저 모두 표시한다.
+        entries[:] = [YearEntry(str(year), '1') for year in range(2024, 2030)]
+        pe.reset_years()
+        self.assertEqual(pe.years_shown(), list(range(2024, 2030)))
+
+        # 6년을 넘는 입력은 값이 있는 연도가 가장 많이 보이는 범위를 고른다.
+        entries[:] = [YearEntry(str(year), '1') for year in (2020, 2024, 2025, 2026, 2027, 2028)]
+        pe.reset_years()
+        self.assertEqual(pe.years_shown(), list(range(2023, 2029)))
+        self.assertIn('앞쪽에 배정이 있는 연도: 2020', pe.year_scroll.toolTip())
+
     def test_T32_year_grid(self):
         projects = [project(period='2026-04-15~2028-09-10'), project('사업2', period='2025-01-01~2029-12-31')]
         projects[0]['yearly'] = {2026: {'allocated_manpower': '1', 'excluded_months': []},
@@ -556,73 +648,77 @@ class GuiTests(unittest.TestCase):
         pe = w.project_editor
         table, grid = pe.table, pe.grid
         headers = [grid.horizontalHeaderItem(c).text() for c in range(grid.columnCount())]
-        self.assertEqual(headers, ['2025', '2026', '2027', '2028', '2029', '2030', '2027 제외월'])
-        self.assertTrue(grid.horizontalHeaderItem(2).font().bold())  # 관리 연도
-        self.assertEqual(self.grid_texts(w), [['', '1', '1.5', '', '', '', '4, 5, 6'],
-                                              ['', '', '10.00000', '', '', '', '']])
+        self.assertEqual(headers, ['2024', '2025', '2026', '2027', '2028', '2029', '2027 제외월'])
+        self.assertTrue(grid.horizontalHeaderItem(3).font().bold())  # 관리 연도
+        self.assertEqual(self.grid_texts(w), [['', '', '1', '1.5', '', '', '4, 5, 6'],
+                                              ['', '', '', '10.00000', '', '', '']])
         # 총 배정은 범위 밖(2032) 연도까지 더하고 편집할 수 없다.
         self.assertEqual(table.item(0, pe.TOTAL).text(), '3.00000')
         self.assertFalse(table.item(0, pe.TOTAL).flags() & Qt.ItemIsEditable)
-        # 범위 밖 값 건수는 버튼 안내 문구에만 알린다. 한 해씩 옮기면 제외월 기준 연도는 보이는 범위 안에 남는다.
-        self.assertEqual((pe.prev_button.text(), pe.next_button.text()), ('◀', '▶'))
-        self.assertIn('뒤쪽에 값이 있는 연도 1건', pe.next_button.toolTip())
-        self.assertEqual(pe.range_label.text(), '2025 ~ 2030')
-        for _ in range(3):
+        # 스크롤바 안내에 보이지 않는 배정 연도를 알린다.
+        self.assertIn('뒤쪽에 배정이 있는 연도: 2032', pe.year_scroll.toolTip())
+        self.assertEqual(pe.range_label.text(), '2024 ~ 2029')
+        for _ in range(4):
             pe.shift_years(1)
         self.assertEqual(pe.range_label.text(), '2028 ~ 2033')
-        self.assertEqual(pe.prev_button.text(), '◀')
-        self.assertIn('앞쪽에 값이 있는 연도 3건', pe.prev_button.toolTip())  # 사업1 2026·2027, 사업2 2027
+        self.assertIn('앞쪽에 배정이 있는 연도: 2026, 2027', pe.year_scroll.toolTip())
         self.assertEqual(pe.excluded_year, 2028)
         self.assertEqual(self.grid_texts(w)[0][4], '0.5')
         pe.reset_years()
-        self.assertEqual(pe.range_label.text(), '2025 ~ 2030')
+        self.assertEqual(pe.range_label.text(), '2024 ~ 2029')
 
         # 색: 기간 밖(회색), 제외 월 있음(연보라, 기간 밖보다 우선), 오류(붉은색, 가장 우선).
-        self.assertEqual(grid.item(0, 2).background().color(), theme.excluded_color())
-        self.assertIn('제외 월: 4, 5, 6', grid.item(0, 2).toolTip())
-        self.assertEqual(grid.item(0, 4).background().color(), theme.outside_color())
-        self.assertIn('사업 기간 밖', grid.item(0, 4).toolTip())
-        grid.item(0, 2).setText('1.5.5')
-        self.assertEqual(grid.item(0, 2).background().color(), theme.problem_color())
+        self.assertEqual(grid.item(0, 3).background().color(), theme.excluded_color())
+        self.assertIn('제외 월: 4, 5, 6', grid.item(0, 3).toolTip())
+        self.assertEqual(grid.item(0, 5).background().color(), theme.outside_color())
+        self.assertIn('사업 기간 밖', grid.item(0, 5).toolTip())
+        grid.item(0, 3).setText('1.5.5')
+        self.assertEqual(grid.item(0, 3).background().color(), theme.problem_color())
         self.assertEqual(table.item(0, pe.TOTAL).text(), '?')
         self.assertIn('2027', table.item(0, pe.TOTAL).toolTip())
-        grid.item(0, 2).setText('1.5')
+        grid.item(0, 3).setText('1.5')
         self.assertEqual(table.item(0, pe.TOTAL).text(), '3.00000')
 
         # 연도 열을 옮기면 제외월 열 제목·내용이 그 연도를 따른다. 항목이 없는 사업은 편집할 수 없다.
-        grid.setCurrentCell(0, 1)
+        grid.setCurrentCell(0, 2)
         self.assertEqual(grid.horizontalHeaderItem(6).text(), '2026 제외월')
         self.assertEqual(self.grid_texts(w)[0][6], '')
         self.assertFalse(grid.item(1, 6).flags() & Qt.ItemIsEditable)
         self.assertIn('먼저 2026 배정인력', grid.item(1, 6).toolTip())
+        self.assertEqual(grid.item(1, 6).background(), grid.item(0, 6).background())
+        grid.setCurrentCell(0, 1)  # 2025에는 두 사업 모두 배정 항목이 없다.
+        self.assertEqual(grid.horizontalHeaderItem(6).text(), '2025 제외월')
+        self.assertEqual(grid.item(0, 6).background(), grid.item(1, 6).background())
+        self.assertEqual(grid.item(0, 6).background().color().alpha(), 0)
+        grid.setCurrentCell(0, 2)
         grid.item(0, 6).setText('3,4')
-        self.assertEqual(grid.item(0, 1).background().color(), theme.excluded_color())
+        self.assertEqual(grid.item(0, 2).background().color(), theme.excluded_color())
         grid.setCurrentCell(0, 6)  # 제외월 열로 가도 기준 연도는 유지한다.
         self.assertEqual(pe.excluded_year, 2026)
         grid.item(0, 6).setText('')
-        self.assertNotEqual(grid.item(0, 1).background().color(), theme.excluded_color())
+        self.assertNotEqual(grid.item(0, 2).background().color(), theme.excluded_color())
 
         # 배정 칸: 입력하면 항목 생성, 비우면 삭제, 제외 월이 남아 있으면 빈 배정으로 남아 오류 표시.
-        grid.item(1, 3).setText('2')
+        grid.item(1, 4).setText('2')
         self.assertEqual([(e.year, e.manpower) for e in pe.projects[1].years], [('2027', '10.00000'), ('2028', '2')])
         self.assertEqual(table.item(1, pe.TOTAL).text(), '12.00000')
-        grid.item(1, 3).setText('')
+        grid.item(1, 4).setText('')
         self.assertEqual([e.year for e in pe.projects[1].years], ['2027'])
-        grid.setCurrentCell(0, 2)
-        grid.item(0, 2).setText('')
+        grid.setCurrentCell(0, 3)
+        grid.item(0, 3).setText('')
         self.assertEqual([(e.year, e.manpower, e.excluded) for e in pe.projects[0].years if e.year == '2027'],
                          [('2027', '', '4, 5, 6')])
-        self.assertEqual(grid.item(0, 2).background().color(), theme.problem_color())
-        grid.item(0, 2).setText('1.5')
+        self.assertEqual(grid.item(0, 3).background().color(), theme.problem_color())
+        grid.item(0, 3).setText('1.5')
 
         # 사업 기간을 바꾸면 기간 밖 표시가 바뀐다.
         table.item(0, pe.END).setText('2029-12-31')
-        self.assertNotEqual(grid.item(0, 4).background().color(), theme.outside_color())
+        self.assertNotEqual(grid.item(0, 5).background().color(), theme.outside_color())
 
         # 좌우 현재 행과 세로 스크롤이 맞물린다.
         table.setCurrentCell(1, 0)
         self.assertEqual(grid.currentRow(), 1)
-        grid.setCurrentCell(0, 2)
+        grid.setCurrentCell(0, 3)
         self.assertEqual(table.currentRow(), 0)
         self.assertEqual(table.horizontalHeader().height(), grid.horizontalHeader().height())
         for n in range(40):
@@ -642,10 +738,10 @@ class GuiTests(unittest.TestCase):
         pe.refresh()
 
         # 엑셀 범위 붙여넣기로 여러 사업·연도를 입력한다.
-        grid.setCurrentCell(0, 3)
+        grid.setCurrentCell(0, 4)
         grid.paste('2\t2\n3\t3')
-        self.assertEqual(self.grid_texts(w)[0][3:5], ['2', '2'])
-        self.assertEqual(self.grid_texts(w)[1][3:5], ['3', '3'])
+        self.assertEqual(self.grid_texts(w)[0][4:6], ['2', '2'])
+        self.assertEqual(self.grid_texts(w)[1][4:6], ['3', '3'])
         self.assertEqual(table.item(1, pe.TOTAL).text(), '16.00000')
 
         # 제외 월 4~6이 계산에 반영된다(사업1 2027 연구 지원은 4~6월 0, 그 달은 사업2가 채운다).
@@ -664,25 +760,83 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(errors, [])
         pe, grid = w.project_editor, w.project_editor.grid
         headers = [grid.horizontalHeaderItem(c).text() for c in range(grid.columnCount())]
-        self.assertEqual(headers, ['2025', '2026', '2027', '2028', '2029', '2030', '2027 제외월'])
-        self.assertEqual(pe.range_label.text(), '2025 ~ 2030')
-        self.assertTrue(grid.horizontalHeaderItem(2).font().bold())  # 관리 연도 중앙 앞쪽
-        # 스크롤바는 배정 구간(2026~2032)과 현재 창을 함께 덮는다.
+        self.assertEqual(headers, ['2024', '2025', '2026', '2027', '2028', '2029', '2027 제외월'])
+        self.assertEqual(pe.range_label.text(), '2024 ~ 2029')
+        self.assertTrue(grid.horizontalHeaderItem(3).font().bold())  # 관리 연도 중앙 오른쪽
+        # 6년 창은 2020~2050 안에서만 움직인다.
         bar = pe.year_scroll
-        self.assertEqual((bar.minimum(), bar.maximum(), bar.value()), (2025, 2027, 2025))
+        self.assertEqual((bar.minimum(), bar.maximum(), bar.value()), (2020, 2045, 2024))
         bar.setValue(2027)
         self.assertEqual(pe.range_label.text(), '2027 ~ 2032')
-        # 옆 버튼은 범위 밖으로 1열씩 확장한다.
-        pe.next_button.click()
-        self.assertEqual(pe.range_label.text(), '2028 ~ 2033')
-        self.assertEqual((bar.minimum(), bar.maximum(), bar.value()), (2026, 2028, 2028))
-        # 제외월 열이 연도 열보다 넓고, 머리글 강조색은 없다.
+        # Fusion 스타일은 양쪽 화살표 자리를 항상 그리며, 클릭하면 한 해씩 이동한다.
         w.resize(1200, 600)
         w.show()
         self.app.processEvents()
+        self.assertEqual(bar.style().objectName().lower(), 'fusion')
+        def arrow_rect(control):
+            option = QStyleOptionSlider()
+            option.initFrom(bar)
+            option.orientation = Qt.Horizontal
+            option.minimum, option.maximum = bar.minimum(), bar.maximum()
+            option.sliderPosition, option.sliderValue = bar.sliderPosition(), bar.value()
+            option.singleStep, option.pageStep = bar.singleStep(), bar.pageStep()
+            option.subControls = QStyle.SC_All
+            return bar.style().subControlRect(QStyle.CC_ScrollBar, option, control, bar)
+        right = arrow_rect(QStyle.SC_ScrollBarAddLine)
+        left = arrow_rect(QStyle.SC_ScrollBarSubLine)
+        self.assertGreater(right.width(), 0)
+        self.assertGreater(left.width(), 0)
+        QTest.mouseClick(bar, Qt.LeftButton, pos=right.center())
+        self.app.processEvents()
+        self.assertEqual(pe.range_label.text(), '2028 ~ 2033')
+        self.assertEqual((bar.minimum(), bar.maximum(), bar.value()), (2020, 2045, 2028))
+        QTest.mouseClick(bar, Qt.LeftButton, pos=arrow_rect(QStyle.SC_ScrollBarSubLine).center())
+        self.app.processEvents()
+        self.assertEqual(pe.range_label.text(), '2027 ~ 2032')
+        bar.setValue(bar.minimum())
+        pe.shift_years(-1)
+        self.assertEqual(pe.years_shown(), list(range(2020, 2026)))
+        bar.setValue(bar.maximum())
+        pe.shift_years(1)
+        self.assertEqual(pe.years_shown(), list(range(2045, 2051)))
+        # 제외월 열이 연도 열보다 넓고, 머리글 강조색은 없다.
         self.assertGreater(grid.columnWidth(6), grid.columnWidth(0))
         for column in range(grid.columnCount()):
             self.assertEqual(grid.horizontalHeaderItem(column).foreground().style(), Qt.NoBrush)
+
+    def test_year_combo_keeps_selected_year_in_project_grid(self):
+        p, h = self.write([project()], [person()])
+        w = self.window()
+        self.assertEqual(w.import_files([str(h)])[0], [])
+        pe = w.project_editor
+        for year in ('2020', '2050'):
+            self.year_answers.append(year)
+            w.add_year()
+        w.year_combo.setCurrentIndex(w.year_combo.findData('2020'))
+        self.assertIn(2020, pe.years_shown())
+        self.assertEqual(pe.year_start, 2020)
+        self.assertEqual(pe.excluded_year, 2020)
+        w.year_combo.setCurrentIndex(w.year_combo.findData('2050'))
+        self.assertIn(2050, pe.years_shown())
+        self.assertEqual(pe.year_start, 2045)
+        self.assertEqual(pe.excluded_year, 2050)
+        pe.year_scroll.setValue(2020)
+        w.year_combo.activated.emit(w.year_combo.currentIndex())
+        self.assertIn(2050, pe.years_shown())
+
+    def test_project_years_outside_view_range_remain_in_data(self):
+        from allocation.editor import ProjectEditor
+
+        pe = ProjectEditor()
+        self.addCleanup(pe.deleteLater)
+        pe.managed_year = lambda: '2027'
+        pe.set_projects([ProjectEntry('사업', '사업', '2019-01-01', '2051-12-31',
+                                      [YearEntry('2019', '1'), YearEntry('2051', '2')])])
+        self.assertEqual(pe.years_shown(), list(range(2024, 2030)))
+        self.assertEqual(pe.table.item(0, pe.TOTAL).text(), '3.00000')
+        self.assertIn('앞쪽에 배정이 있는 연도: 2019', pe.year_scroll.toolTip())
+        self.assertIn('뒤쪽에 배정이 있는 연도: 2051', pe.year_scroll.toolTip())
+        self.assertEqual((pe.year_scroll.minimum(), pe.year_scroll.maximum()), (2020, 2045))
 
     def test_T32_unshown_year_keys(self):
         p, h = self.write([project()], [person()])
@@ -1011,6 +1165,14 @@ class GuiTests(unittest.TestCase):
         output = captured.decode('utf-8', 'replace')
         self.assertNotIn('grabbing the mouse only for popup windows', output)
         self.assertIn('prouman-noise-probe', output)
+
+    def test_qt_message_handler_without_stderr_descriptor(self):
+        from unittest.mock import patch
+        from allocation.gui import _qt_message_handler, install_qt_noise_filter
+        install_qt_noise_filter()
+        install_qt_noise_filter()  # 반복 설치 뒤에도 자기 자신을 이전 핸들러로 호출하지 않는다.
+        with patch('allocation.gui.os.write', side_effect=OSError(9, 'Bad file descriptor')):
+            _qt_message_handler(None, None, 'windowed startup warning')
 
 
 @unittest.skipUnless(QApplication, 'PySide6가 설치되지 않아 GUI 테스트를 건너뜁니다.')

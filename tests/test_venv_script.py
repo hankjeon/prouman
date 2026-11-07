@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -7,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipIf(os.name == 'nt' or shutil.which('bash') is None,
+                 'Linux용 Bash 가상환경 스크립트 테스트입니다.')
 class VenvScriptTests(unittest.TestCase):
     def test_source_activates_from_other_directory_and_is_idempotent(self):
         env = os.environ.copy()

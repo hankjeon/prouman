@@ -94,7 +94,7 @@ people:
 
 연간 할당량은 사람마다 한 번만 기재한다. 사람별 `yearly` 묶음, 월별 12개 숫자 배열, 인력 ID 참조는 앞선 제안에서 쓰였지만 1차 최종 입력 형식이 아니다. 공백 사유를 쓰지 않아도 동일하게 계산한다.
 
-> 후속 기능: 계획 파일의 `stage: planning`·`priorities`·`draft_allocations`와 확정 파일의 선택적 `stage: confirmed`는 [연간 인력 계획 명세](annual-planning.md)에 정의했다. **현재 로더는 이 필드를 지원하지 않는다.** 위의 `allocations` 형식은 지금 실행 가능한 확정 입력이다.
+계획 파일의 `stage: planning`·`priorities`·`draft_allocations`와 확정 파일의 선택적 `stage: confirmed`는 [연간 인력 계획 명세](annual-planning.md)에 정의했다. 확정 파일 로더는 `stage`가 없는 기존 파일도 읽는다. 월별 CLI에 계획 파일을 직접 주면 단계 오류를 표시한다. 계획 파일은 GUI의 계획 화면에서 연다.
 
 ## 내부 계산 값
 

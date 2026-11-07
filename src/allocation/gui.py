@@ -14,12 +14,13 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QVBoxLayout, QWidget)
 
 from . import theme
-from .document import (DocumentError, PeopleDoc, detect_kind, dump_people, dump_projects, read_people,
-                       read_projects, valid_year)
+from .document import (DocumentError, PeopleDoc, PlanDoc, detect_kind, dump_people, dump_plan, dump_projects,
+                       read_people, read_plan, read_projects, valid_year)
 from .editor import PeopleEditor, ProjectEditor, SelectionDelegate
 from .engine import calculate
 from .loading import decode_text, load_inputs
 from .models import amount
+from .planning_gui import PlanningPage
 from .rendering import issue_counts, project_summary
 from .tables import (issue_table, people_summary_table, person_detail_table, project_people_table,
                      project_summary_table)
@@ -139,7 +140,7 @@ class MainWindow(QMainWindow):
 
     결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
 
-    INPUT_PAGE, RESULT_PAGE = 0, 1
+    INPUT_PAGE, RESULT_PAGE, PLAN_PAGE = 0, 1, 2
     PROJECTS_TAB, PEOPLE_TAB, OVERVIEW_TAB = 0, 1, 2  # input_tabs
     ISSUES_TAB, SUMMARY_TAB = 0, 1  # result_tabs
 
@@ -151,6 +152,9 @@ class MainWindow(QMainWindow):
         self.generated_at = None  # 마지막 계산 시각. 결과 화면을 열 때마다 새로 계산한다.
         self.generated_from = ()  # 계산할 때의 사업·사람 파일 표시 이름
         self.people_docs = {}  # 연도 -> PeopleDoc. 같은 연도는 합쳐서 하나로, 다른 연도는 따로 둔다.
+        self.plan_docs = {}  # 연도 -> PlanDoc. 확정 사람 입력과 독립적으로 보관한다.
+        self.plan_dirty = {}
+        self.plan_sources = {}
         self.people_dirty = {}  # 연도 -> 미내보내기 변경 여부
         self.people_sources = {}  # 연도 -> 불러온 파일들
         self.projects_sources = []  # 합친 사업 파일들
@@ -177,6 +181,7 @@ class MainWindow(QMainWindow):
         files_row.addWidget(self.projects_label)
         self.year_combo = QComboBox()
         self.year_combo.currentIndexChanged.connect(self.year_combo_changed)
+        self.year_combo.activated.connect(lambda index: self.project_editor.show_selected_year())
         add_year_button = QPushButton('연도 추가')
         add_year_button.clicked.connect(self.add_year)
         close_year_button = QPushButton('연도 닫기')
@@ -189,6 +194,10 @@ class MainWindow(QMainWindow):
         year_row.addStretch()
         self.project_editor = ProjectEditor()
         self.people_editor = PeopleEditor(lambda: self.project_editor.projects)
+        self.planning_page = PlanningPage(lambda: self.project_editor.projects)
+        self.planning_page.changed.connect(self.plan_changed)
+        self.planning_page.save_requested.connect(self.browse_save_plan)
+        self.planning_page.confirm_requested.connect(self.browse_confirm_plan)
         self.project_editor.managed_year = lambda: self.people_editor.doc.year
         self.people_editor.year_changed.connect(self.project_editor.refresh_grid)
         self.project_editor.allow_remove = self.allow_remove_project
@@ -262,6 +271,7 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.pages.addWidget(input_page)
         self.pages.addWidget(result_page)
+        self.pages.addWidget(self.planning_page)
         nav = QFrame()
         nav.setObjectName('nav')
         # 밝은 회색 고정은 다크 테마에서 따로 논다. 팔레트에서 뽑은 값으로 맞춘다.
@@ -271,7 +281,8 @@ class MainWindow(QMainWindow):
         nav_layout.setContentsMargins(4, 8, 4, 8)
         self.nav_group = QButtonGroup(self)
         self.nav_buttons = []
-        for page, text in ((self.INPUT_PAGE, '✎  입력'), (self.RESULT_PAGE, '▦  결과')):
+        for page, text in ((self.INPUT_PAGE, '✎  입력'), (self.RESULT_PAGE, '▦  결과'),
+                           (self.PLAN_PAGE, '▤  계획')):
             button = QToolButton()
             button.setText(text)
             button.setCheckable(True)
@@ -292,17 +303,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         file_menu = self.menuBar().addMenu('파일')
-        for text, shortcut, slot in (('불러오기', QKeySequence.Open, self.browse_import),
+        for text, shortcut, slot in (('새로 만들기', QKeySequence.New, self.new_all),
+                                    ('불러오기', QKeySequence.Open, self.browse_import),
                                     ('내보내기', QKeySequence.Save, self.browse_export),
-                                    ('새로 만들기', None, self.new_all),
-                                    ('연도 추가', None, self.add_year)):
+                                    ('종료', QKeySequence.Quit, self.close)):
             action = QAction(text, self)
             if shortcut is not None:
                 action.setShortcut(shortcut)
             action.triggered.connect(lambda checked=False, slot=slot: slot())
             file_menu.addAction(action)
         view_menu = self.menuBar().addMenu('보기')
-        for page, text, key in ((self.INPUT_PAGE, '입력 화면', 'Ctrl+1'), (self.RESULT_PAGE, '결과 화면', 'Ctrl+2')):
+        for page, text, key in ((self.INPUT_PAGE, '입력 화면', 'Ctrl+1'),
+                                (self.RESULT_PAGE, '결과 화면', 'Ctrl+2'), (self.PLAN_PAGE, '계획 화면', 'Ctrl+3')):
             action = QAction(text, self)
             action.setShortcut(QKeySequence(key))
             action.triggered.connect(lambda checked=False, page=page: self.show_page(page))
@@ -373,6 +385,8 @@ class MainWindow(QMainWindow):
         if page == self.RESULT_PAGE:
             self.generate()
             return
+        if page == self.PLAN_PAGE:
+            self.planning_page.refresh_review()
         self.pages.setCurrentIndex(page)
         self.nav_buttons[page].setChecked(True)
 
@@ -391,6 +405,7 @@ class MainWindow(QMainWindow):
         self.nav.setStyleSheet(theme.nav_stylesheet())
         self.project_editor.apply_theme()
         self.people_editor.apply_theme()
+        self.planning_page.refresh_review()
         fresh = severity_colors()
         for view in (self.issue_view, self.people_summary_view, self.project_summary_view,
                      self.person_view, self.project_people_view):
@@ -417,12 +432,19 @@ class MainWindow(QMainWindow):
     def people_changed(self):
         self.set_people_dirty(self.current_year, True)
 
+    def plan_changed(self):
+        if self.current_year in self.plan_dirty:
+            self.plan_dirty[self.current_year] = True
+        self.refresh_marks()
+
     def refresh_marks(self):
         """탭·메뉴·연도 목록·사업 줄에 미내보내기 표시(*)를 다시 그린다."""
         self.input_tabs.setTabText(self.PROJECTS_TAB, '사업 입력' + (' *' if self.projects_dirty else ''))
         any_people = any(self.people_dirty.values())
+        any_plan = any(self.plan_dirty.values())
         self.input_tabs.setTabText(self.PEOPLE_TAB, '사람 입력' + (' *' if any_people else ''))
         self.nav_buttons[self.INPUT_PAGE].setText('✎  입력' + (' *' if self.projects_dirty or any_people else ''))
+        self.nav_buttons[self.PLAN_PAGE].setText('▤  계획' + (' *' if any_plan else ''))
         self.refresh_year_combo()
         self.refresh_projects_label()
 
@@ -431,7 +453,7 @@ class MainWindow(QMainWindow):
         combo.blockSignals(True)
         combo.clear()
         for year in sorted(self.people_docs):
-            combo.addItem(year + (' *' if self.people_dirty.get(year) else ''), year)
+            combo.addItem(year + (' *' if self.people_dirty.get(year) or self.plan_dirty.get(year) else ''), year)
         if self.current_year in self.people_docs:
             combo.setCurrentIndex(combo.findData(self.current_year))
         combo.blockSignals(False)
@@ -450,25 +472,55 @@ class MainWindow(QMainWindow):
     def projects_changed(self):
         self.set_projects_dirty(True)
         self.people_editor.refresh()
+        self.planning_page.refresh_review()
 
     def alias_renamed(self, old, new):
         for year, doc in self.people_docs.items():
             if self.people_editor.count_alias(old, doc):
                 self.people_editor.rename_alias(old, new, doc)
                 self.set_people_dirty(year, True)
+        for year, doc in self.plan_docs.items():
+            changed = False
+            for person in doc.people:
+                if old in person.priorities:
+                    person.priorities = {new if key == old else key: value
+                                         for key, value in person.priorities.items()}
+                    if person.draft_allocations is not None:
+                        person.draft_allocations = {new if key == old else key: value
+                                                    for key, value in person.draft_allocations.items()}
+                    changed = True
+            if changed:
+                self.plan_dirty[year] = True
+        self.planning_page.refresh()
+        self.refresh_marks()
 
     def remove_alias_everywhere(self, alias):
         for year, doc in self.people_docs.items():
             if any(alias in person.allocations for person in doc.people):
                 self.people_editor.remove_alias(alias, doc)
                 self.set_people_dirty(year, True)
+        for year, doc in self.plan_docs.items():
+            changed = False
+            for person in doc.people:
+                if alias in person.priorities:
+                    person.priorities.pop(alias)
+                    if person.draft_allocations is not None:
+                        person.draft_allocations.pop(alias, None)
+                    changed = True
+            if changed:
+                self.plan_dirty[year] = True
+        self.planning_page.refresh()
+        self.refresh_marks()
 
     def allow_remove_project(self, project):
         count = sum(self.people_editor.count_alias(project.alias, doc) for doc in self.people_docs.values())
+        plan_count = sum(project.alias in person.priorities for doc in self.plan_docs.values() for person in doc.people)
         name = project.name or project.alias or '(이름 없음)'
         text = f'사업 "{name}"을(를) 삭제할까요?'
         if count:
             text += f'\n이 사업에 입력한 참여율 {count}건도 함께 지워집니다.'
+        if plan_count:
+            text += f'\n계획에서 선택한 사업 {plan_count}건도 함께 지워집니다.'
         if not self.confirm('사업 삭제', text):
             return False
         if count:
@@ -479,17 +531,29 @@ class MainWindow(QMainWindow):
 
     def keep_all(self, what='입력'):
         """내보내지 않은 변경을 처리한다. 진행해도 되면 True."""
-        if not (self.projects_dirty or any(self.people_dirty.values())):
+        if not (self.projects_dirty or any(self.people_dirty.values()) or any(self.plan_dirty.values())):
             return True
         answer = self.ask_export(what)
-        return answer == 'discard' or answer == 'export' and self.browse_export()
+        if answer == 'discard':
+            return True
+        if answer != 'export':
+            return False
+        if (self.projects_dirty or any(self.people_dirty.values())) and not self.browse_export():
+            return False
+        return not any(self.plan_dirty.values()) or self.browse_save_plan()
 
     def keep_year(self, year):
         """해당 연도의 변경을 처리한다. 진행해도 되면 True."""
-        if not self.people_dirty.get(year):
+        if not (self.people_dirty.get(year) or self.plan_dirty.get(year)):
             return True
         answer = self.ask_export(f'{year}년 사람 입력')
-        return answer == 'discard' or answer == 'export' and self.browse_export()
+        if answer == 'discard':
+            return True
+        if answer != 'export':
+            return False
+        if self.people_dirty.get(year) and not self.browse_export():
+            return False
+        return not self.plan_dirty.get(year) or self.browse_save_plan()
 
     def start_folder(self, which='import'):
         if which == 'export':
@@ -530,7 +594,12 @@ class MainWindow(QMainWindow):
                 kind = detect_kind(text)
                 if kind is None:
                     raise DocumentError('사업 파일도 사람 파일도 아닙니다.')
-                document, file_dropped = read_projects(text) if kind == 'projects' else read_people(text)
+                if kind == 'projects':
+                    document, file_dropped = read_projects(text)
+                elif kind == 'plan':
+                    document, file_dropped = read_plan(text), []
+                else:
+                    document, file_dropped = read_people(text)
             except (OSError, UnicodeError, DocumentError) as exc:
                 errors.append(f'{Path(path).name}: {exc}')
                 continue
@@ -552,6 +621,23 @@ class MainWindow(QMainWindow):
                     self.project_editor.table.setCurrentCell(0, 0)
                 self.people_editor.refresh()
                 self.set_projects_dirty(not pristine)
+            elif kind == 'plan':
+                year = document.year.strip()
+                if not valid_year(year):
+                    errors.append(f'{Path(path).name}: 올바른 4자리 연도가 필요합니다.')
+                    continue
+                if year in self.plan_docs and (self.plan_docs[year].people or self.plan_sources.get(year)):
+                    errors.append(f'{Path(path).name}: {year}년 계획이 이미 열려 있습니다.')
+                    continue
+                self.plan_docs[year] = document
+                self.plan_dirty[year] = False
+                self.plan_sources[year] = str(path)
+                if year not in self.people_docs:
+                    self.people_docs[year] = PeopleDoc(year, [])
+                    self.people_dirty[year] = False
+                    self.people_sources[year] = []
+                self.select_year(year)
+                imported_people.append(str(path))
             else:
                 year = document.year.strip()
                 if not year:
@@ -598,6 +684,11 @@ class MainWindow(QMainWindow):
         self.people_editor.blockSignals(True)
         self.people_editor.set_doc(self.people_docs[year])
         self.people_editor.blockSignals(False)
+        if year not in self.plan_docs:
+            self.plan_docs[year] = PlanDoc(year, [])
+            self.plan_dirty[year] = False
+            self.plan_sources[year] = ''
+        self.planning_page.set_doc(self.plan_docs[year], self.plan_sources.get(year) or f'(새 {year} 계획)')
         self.project_editor.reset_years()
         self.refresh_marks()
         self.settings.setValue('current_year', year)
@@ -621,6 +712,11 @@ class MainWindow(QMainWindow):
         self.people_docs[typed] = self.people_docs.pop(self.current_year)
         self.people_dirty[typed] = self.people_dirty.pop(self.current_year)
         self.people_sources[typed] = self.people_sources.pop(self.current_year)
+        if self.current_year in self.plan_docs:
+            self.plan_docs[typed] = self.plan_docs.pop(self.current_year)
+            self.plan_docs[typed].year = typed
+            self.plan_dirty[typed] = self.plan_dirty.pop(self.current_year)
+            self.plan_sources[typed] = self.plan_sources.pop(self.current_year)
         self.people_editor.doc.year = typed
         self.current_year = typed
         self.refresh_year_combo()
@@ -640,6 +736,9 @@ class MainWindow(QMainWindow):
         self.people_docs[year] = PeopleDoc(year, [])
         self.people_dirty[year] = False
         self.people_sources[year] = []
+        self.plan_docs[year] = PlanDoc(year, [])
+        self.plan_dirty[year] = False
+        self.plan_sources[year] = ''
         self.select_year(year)
         self.statusBar().showMessage(f'연도 추가: {year}')
 
@@ -653,9 +752,14 @@ class MainWindow(QMainWindow):
         years = sorted(self.people_docs)
         rest = [y for y in years if y != year]
         closed_sources = self.people_sources.pop(year, [])
+        plan_source = self.plan_sources.pop(year, '')
         del self.people_docs[year]
         del self.people_dirty[year]
+        self.plan_docs.pop(year, None)
+        self.plan_dirty.pop(year, None)
         self.loaded_files = [p for p in self.loaded_files if p not in closed_sources]
+        if plan_source:
+            self.loaded_files = [p for p in self.loaded_files if p != plan_source]
         self.settings.setValue('loaded_files', self.loaded_files)
         self.select_year(rest[min(years.index(year), len(rest) - 1)])
         self.statusBar().showMessage(f'연도 닫기: {year}')
@@ -669,6 +773,9 @@ class MainWindow(QMainWindow):
         self.people_docs = {today: PeopleDoc()}
         self.people_dirty = {today: False}
         self.people_sources = {today: []}
+        self.plan_docs = {today: PlanDoc(today, [])}
+        self.plan_dirty = {today: False}
+        self.plan_sources = {today: ''}
         self.projects_sources = []
         self.loaded_files = []
         self.settings.setValue('loaded_files', [])
@@ -683,6 +790,82 @@ class MainWindow(QMainWindow):
         if not folder:
             return False
         return self.export_all(folder)
+
+    def browse_save_plan(self):
+        folder = self.ask_export_folder()
+        return bool(folder) and self.save_plan(folder)
+
+    def _write_backup_file(self, path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = str(path.resolve())
+        if path.exists() and key not in self.backed_up:
+            shutil.copy2(path, path.with_name(path.name + '.bak'))
+            self.backed_up.add(key)
+        path.write_text(text, encoding='utf-8')
+
+    def save_plan(self, folder):
+        """오류가 남은 수동 초안도 별도 계획 파일에 보존한다."""
+        if not self.flush_year_edit():
+            return False
+        target = Path(folder)
+        plan_path = target / 'plans' / f'plan_{self.current_year}.yaml'
+        try:
+            self._write_backup_file(target / 'projects.yaml', dump_projects(self.project_editor.projects))
+            self._write_backup_file(plan_path, dump_plan(self.plan_docs[self.current_year]))
+        except OSError as exc:
+            self.warn('계획 저장 실패', f'{plan_path}\n{exc.strerror or exc}')
+            return False
+        self.plan_sources[self.current_year] = str(plan_path)
+        self.planning_page.plan_path = str(plan_path)
+        self.plan_dirty[self.current_year] = False
+        self.set_projects_dirty(False)
+        if str(plan_path) not in self.loaded_files:
+            self.loaded_files.append(str(plan_path))
+            self.settings.setValue('loaded_files', self.loaded_files)
+        self.settings.setValue('export_folder', str(folder))
+        self.refresh_marks()
+        self.statusBar().showMessage(f'계획 저장: {plan_path}')
+        return True
+
+    def browse_confirm_plan(self):
+        folder = self.ask_export_folder()
+        return bool(folder) and self.confirm_plan(folder)
+
+    def confirm_plan(self, folder):
+        """현재 초안을 월별 엔진으로 검증한 뒤 확정 파일을 따로 만든다."""
+        if not self.flush_year_edit():
+            return False
+        plan, review = self.planning_page.refresh_review()
+        if plan is None or review is None or review.has_errors:
+            self.warn('확정 불가', '계획 화면의 ERROR를 먼저 해결하세요.')
+            return False
+        doc = self.planning_page.confirmed_doc()
+        from .loading import load_inputs
+        inputs, issues = load_inputs('(현재 사업 입력)', '(현재 확정 입력)',
+                                      {'projects': dump_projects(self.project_editor.projects),
+                                       'people': dump_people(doc)})
+        result = calculate(inputs, issues) if inputs is not None else None
+        if result is None or result.has_errors:
+            self.warn('확정 불가', '확정 사람 파일의 월별 검증을 통과하지 못했습니다.')
+            return False
+        if not self.save_plan(folder):
+            return False
+        path = Path(folder) / 'people' / f'people_{self.current_year}.yaml'
+        try:
+            self._write_backup_file(path, dump_people(doc))
+        except OSError as exc:
+            self.warn('확정 파일 저장 실패', f'{path}\n{exc.strerror or exc}')
+            return False
+        self.people_docs[self.current_year] = doc
+        self.people_sources[self.current_year] = [str(path)]
+        self.people_dirty[self.current_year] = False
+        self.people_editor.set_doc(doc)
+        if str(path) not in self.loaded_files:
+            self.loaded_files.append(str(path))
+            self.settings.setValue('loaded_files', self.loaded_files)
+        self.refresh_marks()
+        self.statusBar().showMessage(f'확정 파일 생성: {path}')
+        return True
 
     def export_all(self, folder):
         """폴더에 projects.yaml과 연도별 사람 파일을 쓴다. 전부 성공하면 True."""
@@ -851,6 +1034,7 @@ WAYLAND_NOISE = (
     'This plugin supports grabbing the mouse only for popup windows',
 )
 _previous_message_handler = None
+_message_handler_installed = False
 
 
 def _qt_message_handler(mode, context, message):
@@ -860,15 +1044,20 @@ def _qt_message_handler(mode, context, message):
         _previous_message_handler(mode, context, message)
     else:
         # 따로 건 핸들러가 없을 때가 Qt 기본 출력이다. PySide6는 기본 핸들러를
-        # 노출하지 않으므로 stderr에 직접 쓴다.
-        os.write(2, f'{message}\n'.encode('utf-8', 'replace'))
+        # 노출하지 않으므로 stderr에 직접 쓴다. --windowed 실행파일에는 2번
+        # 디스크립터가 없을 수 있으므로 이 경우에는 메시지만 버린다.
+        try:
+            os.write(2, f'{message}\n'.encode('utf-8', 'replace'))
+        except OSError:
+            pass
 
 
 def install_qt_noise_filter():
     """알려진 Wayland 무해 경고를 버린다. 두 번 불러도 한 번만 건다."""
-    global _previous_message_handler
-    if _previous_message_handler is None:
+    global _previous_message_handler, _message_handler_installed
+    if not _message_handler_installed:
         _previous_message_handler = qInstallMessageHandler(_qt_message_handler)
+        _message_handler_installed = True
 
 
 def main():

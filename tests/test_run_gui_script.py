@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -7,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipIf(os.name == 'nt' or shutil.which('bash') is None,
+                 'Linux용 Bash GUI 실행 스크립트 테스트입니다.')
 class RunGuiScriptTests(unittest.TestCase):
     def launch_rules(self, extra_env):
         # 가짜 가상환경의 python으로 바꿔치기해 스크립트가 자식에게 넘기는 환경을 본다.

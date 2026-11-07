@@ -1,4 +1,4 @@
-"""정수 흐름: 월별 최소 배정 부족을 먼저 줄인 뒤 균등 초안을 조정한다."""
+"""정수 흐름으로 정확한 균등 배정을 먼저 찾고 제약 충돌을 조정한다."""
 from collections import deque
 
 
@@ -31,7 +31,7 @@ class Flow:
         return delta
 
     def shortest_path(self, source, permitted=None):
-        # 비용은 -1, 0, 1의 정수다. 음수 간선을 포함하므로 Bellman-Ford를 쓴다.
+        # 정수 비용에는 음수 간선도 있으므로 Bellman-Ford를 쓴다.
         distances = [None] * len(self.graph)
         distances[source] = 0
         parents = {source: None}
@@ -73,67 +73,145 @@ class Flow:
             total += self.augment(parents, source, sink, limit)
 
 
-def transport(targets, allowed, capacities, minimum=0):
-    """(해 또는 None, 부족량, 최소 컷 사업, 최소 컷 월)을 반환한다.
+def _month_order(month):
+    return (0 if (month + 1) % 3 == 0 else 1, month)
 
-    minimum은 허용 셀별 소프트 하한(정수 단위)이다. 하한 부족량 합계를
-    최소화한 뒤, 그 최적값을 유지하면서 기존 균등 초안의 우선순위를 따른다.
-    """
+
+def _solve(targets, allowed, capacities, minimum, deviation=None, mode='feasible'):
+    """셀 하한·상한을 예약한 뒤 잔여 수량을 사업→월 흐름으로 채운다."""
     aliases = sorted(targets, key=lambda alias: (len(allowed[alias]), alias))
     count = len(aliases)
     source, sink = count + len(capacities), count + len(capacities) + 1
     flow = Flow(sink + 1)
-    edges = {}
-    for p, alias in enumerate(aliases):
-        flow.add(source, p, targets[alias])
-        for month in sorted(allowed[alias]):
-            cell_edges = []
-            if minimum and targets[alias] > 0:
-                # 최초 minimum 단위에만 비용 -1: 최대 흐름 안에서 하한 충족을 우선한다.
-                cell_edges.append(flow.add(p, count + month, min(minimum, targets[alias]), -1, (p, month)))
-            cell_edges.append(flow.add(p, count + month, targets[alias], cell=(p, month)))
-            edges[p, month] = cell_edges
-    for month, capacity in enumerate(capacities):
-        flow.add(count + month, sink, capacity)
-    total, reachable = flow.run(source, sink, costed=minimum > 0)
-    if total != sum(targets.values()):
-        return (None, sum(targets.values()) - total,
-                [alias for p, alias in enumerate(aliases) if p in reachable],
-                [m + 1 for m in range(len(capacities)) if count + m in reachable])
+    lower = {}
+    upper = {}
+    reserved_month = [0] * len(capacities)
+    for alias in aliases:
+        months = allowed[alias]
+        if not months:
+            if targets[alias]:
+                return None
+            continue
+        quotient, _ = divmod(targets[alias], len(months))
+        for month in months:
+            if mode == 'exact':
+                low, high = quotient, quotient + (targets[alias] % len(months) > 0)
+            else:
+                floor = minimum if mode in ('floor', 'balance') and targets[alias] else 0
+                low = floor if deviation is None else max(floor, quotient - deviation)
+                high = targets[alias] if deviation is None else min(targets[alias], quotient + 1 + deviation)
+            if low > high:
+                return None
+            lower[alias, month], upper[alias, month] = low, high
+            reserved_month[month] += low
+    if any(reserved > capacity for reserved, capacity in zip(reserved_month, capacities)):
+        return None
 
-    # 최소 비용 해를 유지하는 순환 경로로만 균등 초안에 접근한다.
-    # 한 달의 하한이 불가능해도 다른 달의 하한을 함께 해제하지 않는다.
-    locked = set()
+    cell_count = len(lower)
+    floor_weight = cell_count + 1
+    balance_weight = floor_weight * floor_weight
+    # 1단위의 최소치 부족이 가능한 모든 균등 비용·동률 비용보다 우선한다.
+    shortage_weight = (2 * sum(len(allowed[a]) ** 2 * targets[a] for a in aliases)
+                       * balance_weight + cell_count * (floor_weight + 1) + 1)
+    edges = {}
+    remaining = 0
     for p, alias in enumerate(aliases):
-        months = sorted(allowed[alias])
+        months = sorted(allowed[alias], key=_month_order)
+        supply = targets[alias] - sum(lower[alias, month] for month in months)
+        if supply < 0:
+            return None
+        remaining += supply
+        flow.add(source, p, supply)
         if not months:
             continue
         quotient, remainder = divmod(targets[alias], len(months))
-        for position, month in enumerate(months):
-            cell = (p, month)
-            cell_edges = edges[cell]
-            wanted = quotient + (position < remainder)
-            current = sum(edge[2][1] for edge in cell_edges)
-            while current != wanted:
-                increase = wanted > current
-                candidates = cell_edges if increase else [edge[2] for edge in reversed(cell_edges)]
-                selected = next((edge for edge in candidates if edge[1] > 0), None)
-                if selected is None:
-                    break
-                start, finish = (count + month, p) if increase else (p, count + month)
-                def permitted(node, edge):
-                    return edge[4] is not None and edge[4] != cell and edge[4] not in locked
-                parents, distances = flow.shortest_path(start, permitted)
-                if distances[finish] is None or distances[finish] + selected[3] != 0:
-                    break  # 양의 비용 순환은 월별 최소 배정 부족을 늘리므로 허용하지 않는다.
-                delta = flow.augment(parents, start, finish, min(abs(wanted - current), selected[1]))
-                selected[1] -= delta
-                selected[2][1] += delta
-                current += delta if increase else -delta
-            locked.add(cell)
+        for month in months:
+            low, high = lower[alias, month], upper[alias, month]
+            cell_edges = []
+            if high > low:
+                if mode in ('feasible', 'floor'):
+                    cell_edges.append(flow.add(p, count + month, high - low))
+                elif mode == 'exact':
+                    cost = -1 if (month + 1) % 3 == 0 else 0
+                    cell_edges.append(flow.add(p, count + month, high - low, cost))
+                else:
+                    cuts = sorted({low, high} | {point for point in (minimum, minimum + 1,
+                                                                    quotient, quotient + 1)
+                                                 if low < point < high})
+                    for start, end in zip(cuts, cuts[1:]):
+                        first = start + 1
+                        cost = 0
+                        if mode == 'shortage':
+                            cost = -1 if first <= minimum else 0
+                        else:
+                            cost = (abs(len(months) * first - targets[alias])
+                                    - abs(len(months) * (first - 1) - targets[alias])) * balance_weight
+                            if mode == 'soft' and first <= minimum:
+                                cost -= shortage_weight
+                            if minimum and first == minimum + 1:
+                                cost -= floor_weight
+                            if remainder and first == quotient + 1 and (month + 1) % 3 == 0:
+                                cost -= 1
+                        cell_edges.append(flow.add(p, count + month, end - start, cost))
+            edges[alias, month] = cell_edges
+    for month, capacity in enumerate(capacities):
+        flow.add(count + month, sink, capacity - reserved_month[month])
+    costed = mode in ('exact', 'balance', 'soft', 'shortage')
+    sent, _ = flow.run(source, sink, costed=costed)
+    if sent != remaining:
+        return None
     values = {alias: [0] * len(capacities) for alias in aliases}
-    for (p, month), cell_edges in edges.items():
-        values[aliases[p]][month] = sum(edge[2][1] for edge in cell_edges)
+    for (alias, month), cell_edges in edges.items():
+        values[alias][month] = lower[alias, month] + sum(edge[2][1] for edge in cell_edges)
+    return values
+
+
+def _shortage(values, allowed, minimum):
+    return sum(max(0, minimum - values[alias][month])
+               for alias, months in allowed.items() if sum(values[alias]) > 0 for month in months)
+
+
+def transport(targets, allowed, capacities, minimum=0):
+    """완전 균등 → 최저값 안의 균형 → 필요한 최저값 완화 순서로 배분한다."""
+    aliases = sorted(targets, key=lambda alias: (len(allowed[alias]), alias))
+    count = len(aliases)
+    source, sink = count + len(capacities), count + len(capacities) + 1
+    feasibility = Flow(sink + 1)
+    for p, alias in enumerate(aliases):
+        feasibility.add(source, p, targets[alias])
+        for month in sorted(allowed[alias]):
+            feasibility.add(p, count + month, targets[alias])
+    for month, capacity in enumerate(capacities):
+        feasibility.add(count + month, sink, capacity)
+    sent, reachable = feasibility.run(source, sink)
+    if sent != sum(targets.values()):
+        return (None, sum(targets.values()) - sent,
+                [alias for p, alias in enumerate(aliases) if p in reachable],
+                [m + 1 for m in range(len(capacities)) if count + m in reachable])
+
+    exact = _solve(targets, allowed, capacities, minimum, mode='exact')
+    if exact is not None:
+        return exact, 0, [], []
+
+    floor_possible = minimum == 0 or _solve(targets, allowed, capacities, minimum, mode='floor') is not None
+    mode = 'floor' if floor_possible else 'soft'
+    best_shortage = None
+    if not floor_possible:
+        best = _solve(targets, allowed, capacities, minimum, mode='shortage')
+        best_shortage = _shortage(best, allowed, minimum)
+    low, high = 0, max(targets.values(), default=0)
+    while low < high:
+        middle = (low + high) // 2
+        if floor_possible:
+            feasible = _solve(targets, allowed, capacities, minimum, middle, 'floor') is not None
+        else:
+            candidate = _solve(targets, allowed, capacities, minimum, middle, 'shortage')
+            feasible = candidate is not None and _shortage(candidate, allowed, minimum) == best_shortage
+        if feasible:
+            high = middle
+        else:
+            low = middle + 1
+    values = _solve(targets, allowed, capacities, minimum, low, 'balance' if floor_possible else 'soft')
     return values, 0, [], []
 
 

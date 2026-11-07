@@ -43,6 +43,23 @@ class Inputs:
     people_file: str
 
 
+@dataclass(frozen=True)
+class PlanPerson:
+    name: str
+    absences: tuple[tuple[date, date], ...]
+    priorities: dict[str, int]
+    draft_allocations: dict[str, int] | None
+
+
+@dataclass(frozen=True)
+class PlanningInputs:
+    year: int
+    projects: dict[str, Project]
+    people: dict[str, PlanPerson]
+    project_file: str
+    plan_file: str
+
+
 @dataclass
 class Result:
     inputs: Inputs
