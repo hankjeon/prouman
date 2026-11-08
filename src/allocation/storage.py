@@ -6,11 +6,13 @@ from pathlib import Path
 
 
 def write_bundle(jobs, backed_up):
-    """모든 내용을 먼저 준비한다. 교체 실패 시 이미 바꾼 파일을 역순 복구한다.
+    """(경로, 문자열 또는 인코딩된 bytes) 묶음을 준비한 뒤 교체·실패 복구한다.
 
     프로세스 강제 종료·정전까지 보장하는 디스크 트랜잭션은 아니다.
     복구 자체가 실패하면 그 경로를 오류로 알리고 복구용 임시 파일을 남긴다.
     """
+    # 모든 파일을 변환한 뒤 준비한다. 문자 변환 실패로 기존 파일에 손대지 않는다.
+    jobs = [(path, text.encode('utf-8') if isinstance(text, str) else text) for path, text in jobs]
     staged, originals, replaced = {}, {}, []
     preserve = set()
     try:
@@ -21,7 +23,7 @@ def write_bundle(jobs, backed_up):
             path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.prouman-', delete=False) as stream:
                 staged[path] = Path(stream.name)
-                stream.write(text.encode('utf-8'))
+                stream.write(text)
             originals[path] = None
             if path.exists():
                 with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.prouman-restore-', delete=False) as stream:

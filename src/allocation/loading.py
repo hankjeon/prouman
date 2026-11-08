@@ -80,11 +80,8 @@ Loader.add_constructor('tag:yaml.org,2002:timestamp', lambda loader, node: Numbe
 
 
 def decode_text(data):
-    # UTF-8(BOM 허용)을 먼저 시도한다. 한글이 든 UTF-8은 CP949로 오인되지 않지만 그 반대는 가능하므로 순서를 바꾸지 않는다.
-    try:
-        return data.decode('utf-8-sig')
-    except UnicodeDecodeError:
-        return data.decode('cp949')
+    from .text_encoding import decode_yaml
+    return decode_yaml(data).text
 
 
 class Validator:
