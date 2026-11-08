@@ -7,7 +7,9 @@
 - 사용자 요청은 이번 세션의 GUI 변경을 커밋·푸시하여 GitHub main에 병합하는 것이다. 작업 시작 시 로컬 main과 origin/main이 같음(0 0)을 fetch 후 확인했고 GitHub CLI 인증을 확인했다. 소스·문서·테스트 11개 파일을 게시 대상으로 정했다. 새 업무 파일 `myteam/people/people_2027.yaml`은 별도 사용자 자료이므로 커밋에서 제외하고 그대로 보존한다.
 - 게시 범위는 행 드래그 대기 중 확장 선택 방지, 서쪽 입력/결과 탭, 메뉴바 우측 작업모드 콤보, 파일 메뉴 정리, 종합의 사업별합계 행·할당합계 열, 실적/계획 공백 기간 용어와 fixed 패널 상시 표시 및 관련 테스트·문서다. YAML 소스 편집기는 검토 기록만 있고 구현하지 않았다. 배포용 EXE도 빌드하지 않았다.
 - 원래 작업 폴더의 전체 테스트는 새 업무 파일이 확정 예제 순회에 들어가 stage 오류가 나고, UTF-8 자식 프로세스 출력을 CP949로 읽는 오류 2건으로 실패했다. 사용자 파일·제품 코드를 바꾸지 않고 Git 추적 파일의 현재 내용만 임시 폴더 `C:/Users/hankj/AppData/Local/Temp/opencode/prouman-release-piv4t40m`에 복사해 게시 범위를 검증했다.
-- `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `QT_QPA_PLATFORM=offscreen`에서 기존 가상환경 Python으로 `python -m unittest discover -s tests -q` 실행: **169개 중 163개 통과, Linux Bash용 6개 건너뜀**, 약 16초. 이전 세션의 PowerShell 관련 4개 오류도 이번 UTF-8 환경에서는 통과했다. 실제 사용자 업무 파일의 적합성·네이티브 Windows 수동 조작·다른 PC/EXE는 이번 게시 검증 대상이 아니다. 병합 결과는 확인 후 추가 기록한다.
+- `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `QT_QPA_PLATFORM=offscreen`에서 기존 가상환경 Python으로 `python -m unittest discover -s tests -q` 실행: **169개 중 163개 통과, Linux Bash용 6개 건너뜀**, 약 16초. 이전 세션의 PowerShell 관련 4개 오류도 이번 UTF-8 환경에서는 통과했다. 실제 사용자 업무 파일의 적합성·네이티브 Windows 수동 조작·다른 PC/EXE는 이번 게시 검증 대상이 아니다.
+- 11개 파일을 `feat/gui-workspace-usability` 브랜치의 `dd531d5`로 커밋·푸시했다. 스테이징한 변경의 `git diff --cached --check`를 통과했고 업무 YAML이 스테이징되지 않았음을 확인했다. PR #5(https://github.com/hankjeon/prouman/pull/5)의 충돌 없음·별도 자동 검사 없음 상태에서 검증한 head를 지정해 병합했다. GitHub `MERGED` 상태와 병합 커밋 `55aa188b8b7cecc45dac9355380339633cfc1bc3`을 확인했다.
+- 로컬 main을 `git merge --ff-only origin/main`으로 갱신하고 `git diff --exit-code dd531d5 HEAD`로 병합 결과가 게시한 내용과 동일함을 확인했다. 사용자 업무 YAML은 보존했다. 이 병합 기록은 별도 문서 커밋으로 게시한다. 다음은 실제 업무 자료의 사용 흐름 확인이며 YAML 편집기 구현과 EXE 빌드는 별도 요청 전까지 수행하지 않는다.
 
 ## 2026-11-08 — 입력 소스보기 YAML 편집기 제안 검토
 
