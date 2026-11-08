@@ -22,7 +22,9 @@
 - 사용자 명시 요청에 따라 `build_win.ps1` 실행. Windows 11 x64, Python 3.14.7, PyInstaller 6.22.3으로 단일·콘솔 없는 EXE 빌드 성공. 결과 **`publish/win/Prouman.exe`**, **40,531,878바이트**, SHA-256 **`AFB51D1DF7A5D16F4FD0B20DC0CF442C0B49698BDB86E6A53828F635301832EC`**. Git 제외 정책을 유지한다.
 - PE x64(0x8664)·GUI subsystem 2, 내장 PYZ의 새 인코딩/UI/저장 모듈, base_library.zip의 cp949/euc_kr 코덱을 확인했다. 한국어 코덱의 C 구현은 해당 Python의 built-in이다. PyInstaller 경고는 기존 플랫폼별/선택 모듈과 collections.abc 목록이며 빌드는 성공했다.
 - 저장소 밖 임시 작업 폴더에서 새 EXE를 Windows Qt로 실행하고 12초간 실행 중·응답 가능·`인력 배분 — 계획작업` 주 창 제목을 확인한 뒤 점검용 프로세스만 종료했다. 처음 숨김 실행에서는 프로세스는 유지됐으나 MainWindowTitle이 없어 창 제목 확인에 실패했고, 일반 실행으로 다시 확인했다. EXE 내부의 모든 대화상자·인코딩별 저장 클릭/엑셀·다른 PC·정전/프로세스 강제 종료까지 검증한 것은 아니다.
-- `git diff --check`를 통과했고 `git check-ignore publish/win/Prouman.exe`로 배포 파일 제외를 확인했다. GitHub 게시 결과는 확인 후 추가 기록한다. 다음은 실제 업무 자료로 인코딩 선택/저장 흐름 확인이며 다른 기능·YAML 편집기 작업은 별도 합의가 필요하다.
+- `git diff --check`·`git diff --cached --check`를 통과했고 `git check-ignore publish/win/Prouman.exe`로 배포 파일 제외를 확인했다. 소스·문서·테스트 13개 파일을 `feat/yaml-encoding-preservation`의 **`e499827`**로 커밋·푸시했다. EXE와 업무 YAML이 스테이징에 없음을 확인했다.
+- PR #6(https://github.com/hankjeon/prouman/pull/6)의 충돌 없음·별도 자동 검사 없음 상태에서 검증한 head를 지정해 병합했다. GitHub `MERGED` 상태와 병합 커밋 **`c55dbdf0bc324e0cf8a5b746d73c59de15e80a30`**을 확인했다. 로컬 main도 `git merge --ff-only origin/main`으로 갱신하고 `git diff --exit-code e499827 HEAD`로 게시한 내용과 동일함을 확인했다. 이 병합 결과 기록은 별도 문서 커밋으로 게시한다.
+- 다음은 실제 업무 자료로 인코딩 선택/저장 흐름 확인이며 다른 기능·YAML 편집기 작업은 별도 합의가 필요하다. EXE 내부의 모든 저장 흐름·다른 PC 검증은 위 경계대로 남아 있다.
 
 ## 2026-11-09 — YAML 인코딩 유지 요청 검토
 
