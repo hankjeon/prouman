@@ -1,6 +1,6 @@
 """PySide6 데스크톱 화면. 사업·사람 입력을 표로 편집하고, 계산 결과를 그리드로 보여 준다."""
 import os
-import shutil
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +22,8 @@ from .loading import decode_text, load_inputs
 from .models import amount
 from .planning_gui import PlanningPage
 from .storage import write_bundle
+from .text_encoding import ENCODINGS, decode_yaml, encode_yaml
+from .encoding_ui import choose_files, choose_folder
 from .rendering import issue_counts, project_summary
 from .tables import (issue_table, people_summary_table, person_detail_table, project_people_table,
                      project_summary_table)
@@ -164,11 +166,22 @@ class WorkspaceWindow(QMainWindow):
         self.loaded_files = []  # 다시 시작할 때 불러올 경로. 불러온 순서대로 둔다.
         self.current_year = None  # 고른 연도. 편집·계산 대상이다.
         self.backed_up = set()  # 이번 실행에서 .bak을 만든 파일. 첫 내보내기 직전의 원본만 백업한다.
+        self.document_encodings = {}  # 문서 종류:연도 -> 병합한 원본 인코딩 집합
+        self.file_encodings = {}  # 절대 경로 -> (인코딩, 판별 안내)
+        try:
+            choices = json.loads(self.settings.value('read_encodings', '{}'))
+            self.read_encodings = {key: value for key, value in choices.items()
+                                   if isinstance(key, str) and value in ENCODINGS}
+        except (ValueError, TypeError, AttributeError):
+            self.read_encodings = {}
+        self._save_encoding = 'preserve'
         self.setWindowTitle('인력 배분')
         self.resize(1280, 800)
 
         # 입력 화면: 열린 문서 목록, 사업·사람 입력 탭 (파일 명령은 메뉴가 맡는다)
         self.projects_label = QLabel()
+        self.encoding_label = QLabel()
+        self.statusBar().addPermanentWidget(self.encoding_label)
         files_row = QHBoxLayout()
         files_row.addStretch()
         files_row.addWidget(self.projects_label)
@@ -325,7 +338,7 @@ class WorkspaceWindow(QMainWindow):
         return QMessageBox.question(self, title, text) == QMessageBox.Yes
 
     def ask_export_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, '내보내기 폴더 선택', self.start_folder('export') or '.')
+        folder, self._save_encoding = choose_folder(self, self.start_folder('export') or '.')
         return folder
 
     def ask_year(self):
@@ -443,6 +456,78 @@ class WorkspaceWindow(QMainWindow):
             text += ' *'
         self.projects_label.setText(text)
         self.projects_label.setToolTip('\n'.join(self.projects_sources) if self.projects_sources else '불러온 사업 파일 없음')
+        self.refresh_encoding_label()
+
+    def refresh_encoding_label(self):
+        def label(key):
+            codes = self.document_encodings.get(key, set())
+            return ' / '.join(ENCODINGS[code] for code in sorted(codes)) if codes else 'UTF-8 (신규)'
+        key = ('plan:' if self.planning else 'people:') + str(self.current_year)
+        self.encoding_label.setText(f'사업: {label("projects")} · 사람: {label(key)}')
+        self.encoding_label.setToolTip('\n'.join(
+            f'{path}: {ENCODINGS[code]}' + (f' · {note}' if note else '')
+            for path, (code, note) in self.file_encodings.items())
+            + '\n자동 판별은 추정입니다. CP949/EUC-KR 공통 바이트는 CP949, ASCII는 UTF-8로 처리합니다.')
+
+    def remember_encoding(self, path, decoded, key):
+        path = str(Path(path).resolve())
+        self.file_encodings[path] = (decoded.encoding, decoded.note)
+        self.document_encodings.setdefault(key, set()).add(decoded.encoding)
+
+    def persist_read_encodings(self):
+        self.settings.setValue('read_encodings', json.dumps(self.read_encodings, ensure_ascii=False))
+
+    def choose_output_encoding(self, path, key, interactive):
+        """기존 대상 파일 우선, 새 경로는 원본 문서의 인코딩을 따른다."""
+        if path.exists():
+            return decode_yaml(path.read_bytes(), self.read_encodings.get(str(path.resolve()), 'auto')).encoding
+        codes = self.document_encodings.get(key, set())
+        if len(codes) <= 1:
+            return next(iter(codes), 'utf-8')
+        if not interactive:
+            raise ValueError(f'{path}: 원본 인코딩이 혼합되어 있습니다. 저장 인코딩을 직접 선택하세요.')
+        label, ok = QInputDialog.getItem(self, '저장 인코딩 선택',
+                                        f'{path.name}: 원본 인코딩이 혼합되어 있습니다.',
+                                        list(ENCODINGS.values()), 0, False)
+        return next(code for code, text in ENCODINGS.items() if text == label) if ok else None
+
+    def write_yaml_jobs(self, jobs, encoding='preserve', interactive=False, adopt_document=True):
+        """변환·사용자 확인이 모두 끝나야 파일 묶음을 교체한다. 실패 시 메타데이터도 유지한다."""
+        prepared, resolved = [], []
+        try:
+            for path, text, key in jobs:
+                path = Path(path)
+                code = (self.choose_output_encoding(path, key, interactive)
+                        if encoding == 'preserve' else encoding)
+                if code is None:
+                    return False
+                try:
+                    data = encode_yaml(text, code)
+                except UnicodeEncodeError:
+                    if not interactive:
+                        raise ValueError(f'{path}: {ENCODINGS[code]}로 표현할 수 없는 문자가 있습니다. '
+                                         'UTF-8로 지정하여 다시 저장하세요.')
+                    if not self.confirm('UTF-8로 저장할까요?',
+                                        f'{path}\n{ENCODINGS[code]}로 표현할 수 없는 문자가 있습니다. '
+                                        '이 파일을 UTF-8로 바꿔 저장할까요? (아니요: 전체 저장 취소)'):
+                        return False
+                    code, data = 'utf-8', encode_yaml(text, 'utf-8')
+                prepared.append((path, data))
+                resolved.append((path, key, code))
+            write_bundle(prepared, self.backed_up)
+        except (OSError, UnicodeError, ValueError) as exc:
+            self.warn('YAML 저장 실패', str(exc))
+            return False
+        for path, key, code in resolved:
+            canonical = str(path.resolve())
+            self.file_encodings[canonical] = (code, '저장 인코딩')
+            self.read_encodings[canonical] = code
+            # 병합 결과를 저장한 다음에는 이 인코딩이 새 경로 저장의 기준이 된다.
+            if adopt_document:
+                self.document_encodings[key] = {code}
+        self.persist_read_encodings()
+        self.refresh_encoding_label()
+        return True
 
     def projects_changed(self):
         self.set_projects_dirty(True)
@@ -554,26 +639,31 @@ class WorkspaceWindow(QMainWindow):
         return ''
 
     def browse_import(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, '불러오기', self.start_folder('import'), YAML_FILTER)
+        paths, encoding = choose_files(self, self.start_folder('import') or '.')
         if paths:
             self.settings.setValue('import_folder', str(Path(paths[0]).parent))
-            self.run_import(paths)
+            self.run_import(paths, encoding=encoding)
 
     def browse_prepare_plan(self):
         """명시적인 명령으로만 실적 사람 파일을 새 계획 참고값으로 변환한다."""
-        path, _ = QFileDialog.getOpenFileName(self, '계획의 참고 자료로 사용할 실적 사람 파일',
-                                             self.start_folder('import'), YAML_FILTER)
-        if not path:
+        paths, encoding = choose_files(self, self.start_folder('import') or '.', single=True)
+        if not paths:
             return False
+        path = paths[0]
         try:
-            doc, dropped = read_people(decode_text(Path(path).read_bytes()))
+            decoded = decode_yaml(Path(path).read_bytes(), encoding)
+            doc, dropped = read_people(decoded.text)
             if dropped:
                 raise DocumentError('지원하지 않는 항목이 있어 변환하지 않았습니다: ' + ', '.join(dropped))
             year, ok = QInputDialog.getText(self, '계획 연도', '새 계획 연도 (휴직 날짜는 자동 이동하지 않습니다):',
                                             text=str(int(doc.year) + 1) if valid_year(doc.year) else '')
             if not ok:
                 return False
-            return self.prepare_plan(doc, year)
+            if not self.prepare_plan(doc, year):
+                return False
+            self.document_encodings['plan:' + self.current_year] = {decoded.encoding}
+            self.refresh_encoding_label()
+            return True
         except (OSError, UnicodeError, DocumentError) as exc:
             self.warn('계획 준비 실패', str(exc))
             return False
@@ -595,6 +685,7 @@ class WorkspaceWindow(QMainWindow):
         self.plan_docs[doc.year] = doc
         self.plan_sources[doc.year] = ''
         self.plan_dirty[doc.year] = True
+        self.document_encodings.pop('plan:' + doc.year, None)
         self.select_year(doc.year)
         self.show_page(self.INPUT_PAGE)
         self.input_tabs.setCurrentIndex(self.PEOPLE_TAB)
@@ -604,9 +695,9 @@ class WorkspaceWindow(QMainWindow):
         self.statusBar().showMessage(message)
         return True
 
-    def run_import(self, paths):
+    def run_import(self, paths, encoding=None):
         """불러온 뒤 실패·지원 외 항목을 모아 한 번씩만 알린다."""
-        errors, dropped = self.import_files(paths)
+        errors, dropped = self.import_files(paths, encoding=encoding)
         if errors:
             self.warn('불러오기', '다음 파일은 열지 못했습니다:\n' + '\n'.join(errors))
         if dropped:
@@ -614,12 +705,15 @@ class WorkspaceWindow(QMainWindow):
             self.warn('지원하지 않는 항목', '표 편집기에서 다루지 않는 다음 항목은 내보낼 때 빠집니다.\n'
                       + '\n'.join(lines[:20]) + ('\n...' if len(lines) > 20 else ''))
 
-    def import_files(self, paths):
+    def import_files(self, paths, encoding=None):
         """파일을 추가로 불러온다. 성공한 것만 반영하고 (실패 설명, 지원 외 항목)을 돌려준다."""
         errors, dropped, imported_people, migrated = [], [], [], []
         for path in paths:
             try:
-                text = decode_text(Path(path).read_bytes())
+                canonical = str(Path(path).resolve())
+                selected = encoding if encoding is not None else self.read_encodings.get(canonical, 'auto')
+                decoded = decode_yaml(Path(path).read_bytes(), selected)
+                text = decoded.text
                 kind = detect_kind(text)
                 if kind is None:
                     raise DocumentError('사업 파일도 사람 파일도 아닙니다.')
@@ -633,7 +727,7 @@ class WorkspaceWindow(QMainWindow):
                     document, file_dropped = read_plan(text), []
                 else:
                     document, file_dropped = read_people(text)
-            except (OSError, UnicodeError, DocumentError) as exc:
+            except (OSError, UnicodeError, DocumentError, ValueError) as exc:
                 errors.append(f'{Path(path).name}: {exc}')
                 continue
             if file_dropped:
@@ -701,6 +795,13 @@ class WorkspaceWindow(QMainWindow):
                     self.select_year(year)
                 imported_people.append(str(path))
             self.loaded_files.append(str(path))
+            key = 'projects' if kind == 'projects' else kind + ':' + year
+            self.remember_encoding(path, decoded, key)
+            if selected == 'auto':
+                self.read_encodings.pop(canonical, None)
+            else:
+                self.read_encodings[canonical] = selected
+            self.persist_read_encodings()
             self.settings.setValue('loaded_files', self.loaded_files)
         if imported_people and not self.project_editor.projects and not self.projects_dirty:
             # 사업 입력이 비어 있을 때만 사람 파일 옆의 사업 파일을 자동으로 가져온다.
@@ -714,6 +815,7 @@ class WorkspaceWindow(QMainWindow):
             if migrated:
                 message += ' · 이전 계획 형식 변환 (참고점수 0, 결과·순위 보존): ' + ', '.join(migrated)
             self.statusBar().showMessage(message)
+        self.refresh_encoding_label()
         return errors, dropped
 
     def select_year(self, year):
@@ -750,6 +852,10 @@ class WorkspaceWindow(QMainWindow):
         self.people_docs[typed] = self.people_docs.pop(self.current_year)
         self.people_dirty[typed] = self.people_dirty.pop(self.current_year)
         self.people_sources[typed] = self.people_sources.pop(self.current_year)
+        for kind in ('people', 'plan'):
+            codes = self.document_encodings.pop(kind + ':' + str(self.current_year), None)
+            if codes is not None:
+                self.document_encodings[kind + ':' + typed] = codes
         if self.current_year in self.plan_docs:
             self.plan_docs[typed] = self.plan_docs.pop(self.current_year)
             self.plan_docs[typed].year = typed
@@ -795,6 +901,8 @@ class WorkspaceWindow(QMainWindow):
         del self.people_dirty[year]
         self.plan_docs.pop(year, None)
         self.plan_dirty.pop(year, None)
+        self.document_encodings.pop('people:' + year, None)
+        self.document_encodings.pop('plan:' + year, None)
         self.loaded_files = [p for p in self.loaded_files if p not in closed_sources]
         if plan_source:
             self.loaded_files = [p for p in self.loaded_files if p != plan_source]
@@ -815,6 +923,8 @@ class WorkspaceWindow(QMainWindow):
         self.plan_dirty = {today: False}
         self.plan_sources = {today: ''}
         self.projects_sources = []
+        self.document_encodings.clear()
+        self.file_encodings.clear()
         self.loaded_files = []
         self.settings.setValue('loaded_files', [])
         self.set_projects_dirty(False)
@@ -826,16 +936,18 @@ class WorkspaceWindow(QMainWindow):
     def browse_export(self):
         if self.planning:
             return self.browse_confirm_plan()
+        self._save_encoding = 'preserve'
         folder = self.ask_export_folder()
         if not folder:
             return False
-        return self.export_all(folder)
+        return self.export_all(folder, encoding=self._save_encoding, interactive=True)
 
     def browse_save_plan(self):
+        self._save_encoding = 'preserve'
         folder = self.ask_export_folder()
-        return bool(folder) and self.save_plan(folder)
+        return bool(folder) and self.save_plan(folder, encoding=self._save_encoding, interactive=True)
 
-    def save_plan(self, folder):
+    def save_plan(self, folder, encoding='preserve', interactive=False):
         """오류가 남은 수동 초안도 별도 계획 파일에 보존한다."""
         if not self.flush_year_edit():
             return False
@@ -843,11 +955,10 @@ class WorkspaceWindow(QMainWindow):
         plan_path = target / 'plans' / f'plan_{self.current_year}.yaml'
         previous_sources = set(self.projects_sources)
         previous_sources.add(self.plan_sources.get(self.current_year, ''))
-        try:
-            write_bundle([(target / 'projects.yaml', dump_projects(self.project_editor.projects)),
-                          (plan_path, dump_plan(self.plan_docs[self.current_year]))], self.backed_up)
-        except OSError as exc:
-            self.warn('계획 저장 실패', f'{plan_path}\n{exc.strerror or exc}')
+        if not self.write_yaml_jobs([
+                (target / 'projects.yaml', dump_projects(self.project_editor.projects), 'projects'),
+                (plan_path, dump_plan(self.plan_docs[self.current_year]), 'plan:' + self.current_year)],
+                encoding, interactive):
             return False
         self.plan_sources[self.current_year] = str(plan_path)
         self.planning_page.plan_path = str(plan_path)
@@ -866,10 +977,11 @@ class WorkspaceWindow(QMainWindow):
         return True
 
     def browse_confirm_plan(self):
+        self._save_encoding = 'preserve'
         folder = self.ask_export_folder()
-        return bool(folder) and self.confirm_plan(folder)
+        return bool(folder) and self.confirm_plan(folder, encoding=self._save_encoding, interactive=True)
 
-    def confirm_plan(self, folder):
+    def confirm_plan(self, folder, encoding='preserve', interactive=False):
         """현재 초안을 월별 엔진으로 검증한 뒤 확정 파일을 따로 만든다."""
         if not self.flush_year_edit():
             return False
@@ -894,41 +1006,25 @@ class WorkspaceWindow(QMainWindow):
         if project_path.resolve() in protected or path.resolve() in protected:
             self.warn('별도 폴더 필요', '계획 작업 자료·불러온 원본과 다른 폴더로 내보내세요.')
             return False
-        try:
-            write_bundle([(project_path, dump_projects(self.project_editor.projects)),
-                          (path, dump_people(doc))], self.backed_up)
-        except OSError as exc:
-            self.warn('확정 파일 저장 실패', f'{path}\n{exc.strerror or exc}')
+        if not self.write_yaml_jobs([
+                (project_path, dump_projects(self.project_editor.projects), 'projects'),
+                (path, dump_people(doc), 'plan:' + self.current_year)],
+                encoding, interactive, adopt_document=False):
             return False
         self.settings.setValue('export_folder', str(folder))
         self.statusBar().showMessage(f'확정 파일 생성: {path}')
         return True
 
-    def export_all(self, folder):
+    def export_all(self, folder, encoding='preserve', interactive=False):
         """폴더에 projects.yaml과 연도별 사람 파일을 쓴다. 전부 성공하면 True."""
         if not self.flush_year_edit():
             return False
         target = Path(folder)
-        jobs = [(target / 'projects.yaml', dump_projects(self.project_editor.projects))]
+        jobs = [(target / 'projects.yaml', dump_projects(self.project_editor.projects), 'projects')]
         for year in sorted(self.people_docs):
-            jobs.append((target / 'people' / f'people_{year}.yaml', dump_people(self.people_docs[year])))
-        try:
-            (target / 'people').mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            self.warn('내보내기 실패', f'{target / "people"}\n{exc.strerror or exc}')
-            return False
-        errors = []
-        for path, text in jobs:
-            try:
-                key = str(path.resolve())
-                if path.exists() and key not in self.backed_up:
-                    shutil.copy2(path, path.with_name(path.name + '.bak'))
-                    self.backed_up.add(key)
-                path.write_text(text, encoding='utf-8')
-            except OSError as exc:
-                errors.append(f'{path.name}: {exc.strerror or exc}')
-        if errors:
-            self.warn('내보내기 실패', '다음 파일은 쓰지 못했습니다:\n' + '\n'.join(errors))
+            jobs.append((target / 'people' / f'people_{year}.yaml', dump_people(self.people_docs[year]),
+                         'people:' + year))
+        if not self.write_yaml_jobs(jobs, encoding, interactive):
             return False
         self.set_projects_dirty(False)
         for year in self.people_dirty:
