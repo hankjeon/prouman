@@ -647,7 +647,7 @@ class ProjectDelegate(SelectionDelegate):
 
 
 class PeopleEditor(QWidget):
-    """관리 연도, 왼쪽 사람 목록, 오른쪽 고른 사람의 참여 사업·참여율과 휴직 기간."""
+    """관리 연도, 왼쪽 사람 목록, 오른쪽 고른 사람의 참여 사업·참여율과 공백 기간."""
 
     changed = Signal()
     year_changed = Signal()
@@ -692,21 +692,21 @@ class PeopleEditor(QWidget):
         self.absences = EditTable(['시작일', '종료일', '사유'], stretch_last=True)
         self.absences.set_date_columns(0, 1)
         self.absences.itemChanged.connect(self.absence_edited)
-        self.add_absence_button, self.remove_absence_button = QPushButton('휴직 추가'), QPushButton('휴직 삭제')
+        self.add_absence_button, self.remove_absence_button = QPushButton('공백 추가'), QPushButton('공백 삭제')
         self.add_absence_button.clicked.connect(self.add_absence)
         self.remove_absence_button.clicked.connect(self.remove_absence)
         right = QSplitter(Qt.Vertical)
         right.addWidget(titled(self.title, self.allocations, self.totals,
                                button_row(self.add_row_button, self.remove_row_button, self.add_fixed_button)))
         right.addWidget(self.fixed_panel)
-        right.addWidget(titled('휴직 기간', self.absences,
+        right.addWidget(titled('공백 기간', self.absences,
                                button_row(self.add_absence_button, self.remove_absence_button)))
         right.setSizes([350, 200, 250])
 
         year_row = QHBoxLayout()
         year_row.addWidget(QLabel('관리 연도'))
         year_row.addWidget(self.year_edit)
-        year_row.addWidget(QLabel('사람마다 사업 합계 + 공백(휴직) = 1.00000이 되도록 참여율을 입력합니다. '
+        year_row.addWidget(QLabel('사람마다 사업 합계 + 공백 = 1.00000이 되도록 참여율을 입력합니다. '
                                   '사업은 관리 연도에 배정이 있는 사업에서 고릅니다.'))
         year_row.addStretch()
         split = QSplitter(Qt.Horizontal)
@@ -776,7 +776,7 @@ class PeopleEditor(QWidget):
     def total_problem(self, person):
         targets, absence = person_totals(person, self.doc.year)
         if targets is None or absence is None:
-            return '참여율이나 휴직 기간 형식을 확인하세요.'
+            return '참여율이나 공백 기간 형식을 확인하세요.'
         if targets + absence != 100000:
             return f'사업 합계 + 공백이 1.00000이어야 합니다 (현재 {amount(targets + absence)}).'
         return ''
@@ -1045,7 +1045,7 @@ class PeopleEditor(QWidget):
                                 editable=False, computed=True, problem=problem)
         self.fixed.blockSignals(False)
         self.fixed.resizeColumnsToContents()
-        self.fixed_panel.setVisible(bool(entries))
+        # fixed가 없는 사람도 표에서 바로 추가할 수 있도록 패널은 항상 보여 준다.
 
     def add_fixed(self):
         person, row = self.current(), self.allocations.currentRow()
@@ -1093,7 +1093,7 @@ class PeopleEditor(QWidget):
         self.mark_person(self.people_list.currentRow())
         self.notify()
 
-    # --- 휴직 ---
+    # --- 공백 기간 ---
 
     def show_absences(self):
         person = self.current()
@@ -1153,13 +1153,19 @@ class PeopleOverview(QWidget):
         self.editor = editor
         self.matrix = EditTable()
         self.matrix.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.matrix.cellDoubleClicked.connect(lambda row, column: self.person_requested.emit(row))
+        self.matrix.cellDoubleClicked.connect(self._double_clicked)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel('전체 사람의 사업 참여율입니다. 편집은 사람 입력 탭에서 합니다 '
                                 '(행을 두 번 누르면 그 사람으로 이동). '
-                                '이름 셀을 드래그하면 행, 사업 머리글을 드래그하면 열 순서가 바뀝니다.'))
+                                '이름 셀을 드래그하면 행, 사업 머리글을 드래그하면 열 순서가 바뀝니다. '
+                                '맨 아래 사업별합계 행은 고정 행입니다.'))
         layout.addWidget(self.matrix)
+
+    def _double_clicked(self, row, column):
+        """합계 행을 두 번 눌러도 사람 입력 화면으로 이동하지 않는다."""
+        if 0 <= row < len(self.editor.doc.people):
+            self.person_requested.emit(row)
 
     def refresh(self):
         doc, projects = self.editor.doc, self.editor.projects()
@@ -1171,14 +1177,14 @@ class PeopleOverview(QWidget):
         matrix = self.matrix
         matrix._ordering_update = True
         matrix.setColumnCount(len(headers) + 3)
-        matrix.setHorizontalHeaderLabels(headers + ['사업 합계', '공백', '합계'])
+        matrix.setHorizontalHeaderLabels(headers + ['할당합계', '공백', '합계'])
         for column, (alias, ok) in enumerate(columns, 1):
             matrix.horizontalHeaderItem(column).setToolTip(names.get(alias, '사업 목록에 없는 약칭입니다.')
                                                           + '\n드래그하여 사업 열 순서를 바꿀 수 있습니다.')
         matrix.horizontalHeaderItem(0).setToolTip('사람 이름 셀을 드래그하면 행 전체가 이동합니다.')
         for column in range(len(headers), matrix.columnCount()):
             matrix.horizontalHeaderItem(column).setToolTip('고정 열입니다. 드래그로 이동하지 않습니다.')
-        matrix.setRowCount(len(doc.people))
+        matrix.setRowCount(len(doc.people) + (1 if doc.people else 0))
         for row, person in enumerate(doc.people):
             matrix.set_cell(row, 0, person.name, editable=False, problem=self.editor.name_problem(person))
             for column, (alias, ok) in enumerate(columns, 1):
@@ -1193,6 +1199,40 @@ class PeopleOverview(QWidget):
             for offset, value in enumerate((targets, absence, total)):
                 matrix.set_cell(row, base + offset, amount(value) if value is not None else '?', editable=False,
                                 computed=True, problem=self.editor.total_problem(person) if offset == 2 else '')
+        if doc.people:
+            total_row = len(doc.people)
+            matrix.set_cell(total_row, 0, '사업별합계', editable=False,
+                            note='각 사업 열의 사람 합계입니다. 드래그로 이동하지 않습니다.')
+            for column, (alias, ok) in enumerate(columns, 1):
+                bad, subtotal = False, 0
+                for person in doc.people:
+                    raw = person.allocations.get(alias, '')
+                    if not raw:
+                        continue
+                    unit = quantity_units(raw)
+                    if unit is None:
+                        bad = True
+                        break
+                    subtotal += unit
+                matrix.set_cell(total_row, column, '?' if bad else amount(subtotal), editable=False,
+                                computed=True)
+            business, absence_total, bad_business, bad_absence = 0, 0, False, False
+            for person in doc.people:
+                targets, absence = person_totals(person, doc.year)
+                if targets is None:
+                    bad_business = True
+                else:
+                    business += targets
+                if absence is None:
+                    bad_absence = True
+                else:
+                    absence_total += absence
+            base = len(columns) + 1
+            for offset, (value, bad) in enumerate(((business, bad_business),
+                                                  (absence_total, bad_absence),
+                                                  (business + absence_total, bad_business or bad_absence))):
+                matrix.set_cell(total_row, base + offset, '?' if bad else amount(value), editable=False,
+                                computed=True)
         matrix.configure_order(('overview', doc.year),
                                rows={row: person.name for row, person in enumerate(doc.people)},
                                columns={column: alias for column, (alias, _) in enumerate(columns, 1)})

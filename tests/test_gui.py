@@ -17,7 +17,7 @@ else:
     from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QComboBox, QStyle, QStyleOptionSlider
+    from PySide6.QtWidgets import QApplication, QComboBox, QStyle, QStyleOptionSlider, QTabWidget
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -231,6 +231,29 @@ class GuiTests(unittest.TestCase):
         w.show_page(w.RESULT_PAGE)
         self.assertIsNotNone(w.result)
 
+    def test_fixed_panel_visible_without_entries_and_addable(self):
+        self.capture_slot_errors()
+        p, h = self.write([project(), project('사업2')], [person({'사업1': '0.6', '사업2': '0.4'})])
+        w = self.window()
+        w.resize(1400, 900)
+        w.show()
+        errors, _ = w.import_files([str(p), str(h)])
+        self.assertEqual(errors, [])
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.PEOPLE_TAB)
+        self.app.processEvents()
+        editor = w.people_editor
+        self.assertEqual(editor.doc.people[0].fixed, {})
+        # YAML에 fixed가 없어도 월별 고정 표와 추가 버튼이 보인다.
+        self.assertTrue(editor.fixed_panel.isVisible())
+        self.assertEqual(editor.fixed.rowCount(), 0)
+        self.assertTrue(editor.add_fixed_button.isVisible())
+        editor.allocations.setCurrentCell(0, editor.PROJECT)
+        QTest.mouseClick(editor.add_fixed_button, Qt.LeftButton)
+        self.assertEqual(list(editor.doc.people[0].fixed), ['사업1'])
+        self.assertEqual(editor.fixed.rowCount(), 1)
+        self.assertTrue(editor.fixed_panel.isVisible())
+
     def test_fixed_edit_save_rename_unlock_and_recreate(self):
         from allocation.document import read_people
         from test_fixed_allocations import HALF_YEAR
@@ -358,7 +381,7 @@ class GuiTests(unittest.TestCase):
         w.input_tabs.setCurrentIndex(w.OVERVIEW_TAB)
         self.app.processEvents()
         view = w.people_editor.overview.matrix
-        original = [[view.item(r, c).text() for c in range(6)] for r in range(2)]
+        original = [[view.item(r, c).text() for c in range(6)] for r in range(3)]
         original_doc = dump_people(w.people_editor.doc)
         original_dirty = dict(w.people_dirty)
         self.drag_label_row(view, 0, 1)
@@ -388,7 +411,7 @@ class GuiTests(unittest.TestCase):
         header.moveSection(header.visualIndex(1), 5)  # 사업 열도 고정 영역을 넘을 수 없다.
         self.assertEqual([header.logicalIndex(i) for i in range(6)], [0, 2, 1, 3, 4, 5])
         view.selectAll()
-        expected = '\n'.join('\t'.join(original[r][c] for c in (0, 2, 1, 3, 4, 5)) for r in (1, 0))
+        expected = '\n'.join('\t'.join(original[r][c] for c in (0, 2, 1, 3, 4, 5)) for r in (1, 0, 2))
         self.assertEqual(view.copy_selection(), expected)
         w.people_editor.overview.refresh()
         view.selectAll()
@@ -400,6 +423,15 @@ class GuiTests(unittest.TestCase):
         QTest.mouseDClick(view.viewport(), Qt.LeftButton, Qt.NoModifier,
                          view.visualRect(view.model().index(0, 0)).center())
         self.assertEqual(requested[-1], 0)  # 이동한 화면 위치 대신 원래 사람을 연다.
+        before = list(requested)
+        totals_visual = view.verticalHeader().visualIndex(2)
+        self.assertEqual(totals_visual, 2)  # 합계 행은 맨 아래에 고정한다.
+        self.drag_label_row(view, 2, 0)
+        self.assertEqual(view.verticalHeader().logicalIndex(2), 2)
+        self.assertEqual(view.verticalHeader().visualIndex(2), 2)
+        QTest.mouseDClick(view.viewport(), Qt.LeftButton, Qt.NoModifier,
+                         view.visualRect(view.model().index(2, 0)).center())
+        self.assertEqual(requested, before)  # 합계 행을 두 번 눌러도 이동하지 않는다.
 
     def test_overview_order_survives_added_removed_people_and_projects(self):
         from allocation.document import PeopleDoc, PersonEntry
@@ -416,18 +448,20 @@ class GuiTests(unittest.TestCase):
         editor.overview.refresh()
         view.selectAll()
         rows = [row.split('\t') for row in view.copy_selection().splitlines()]
-        self.assertEqual([row[0] for row in rows], ['나', '가', '다'])
+        self.assertEqual([row[0] for row in rows], ['나', '가', '다', '사업별합계'])
         self.assertEqual([view.horizontalHeaderItem(view.horizontalHeader().logicalIndex(c)).text()
-                          for c in range(7)], ['이름', '사업2', '사업1', '사업3', '사업 합계', '공백', '합계'])
+                          for c in range(7)], ['이름', '사업2', '사업1', '사업3', '할당합계', '공백', '합계'])
         self.assertEqual(rows[0][1:4], ['1', '', ''])
+        self.assertEqual(rows[3], ['사업별합계', '1.00000', '1.00000', '1.00000', '3.00000', '0.00000', '3.00000'])
         del editor.doc.people[0]
         del projects[0]
         editor.overview.refresh()
         view.selectAll()
         rows = [row.split('\t') for row in view.copy_selection().splitlines()]
-        self.assertEqual([row[0] for row in rows], ['나', '다'])
+        self.assertEqual([row[0] for row in rows], ['나', '다', '사업별합계'])
         self.assertEqual([view.horizontalHeader().visualIndex(c) for c in range(3, 6)], [3, 4, 5])
         self.assertEqual(rows[1][1:3], ['', '1'])
+        self.assertEqual(rows[2], ['사업별합계', '1.00000', '1.00000', '2.00000', '0.00000', '2.00000'])
 
     def test_T29_generate_views_copy_excel_and_settings(self):
         w = self.generated([project(), project('사업2')],
@@ -592,7 +626,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.font().pointSize(), DEFAULT_FONT_SIZE)
         menus = {a.text(): a.menu() for a in w.menuBar().actions()}
         self.assertEqual([a.text() for a in menus['보기'].actions()],
-                         ['입력 화면', '결과 화면', '', '글자 크게', '글자 작게', '기본 크기'])
+                         ['글자 크게', '글자 작게', '기본 크기'])
 
     # --- T30 입력 편집기 ---
 
@@ -615,8 +649,9 @@ class GuiTests(unittest.TestCase):
         self.assertEqual([w.project_editor.table.item(0, c).text() for c in range(4)],
                          ['사업1', '사업1', '2027-01-01', '2027-12-31'])
         self.assertEqual([matrix.horizontalHeaderItem(c).text() for c in range(matrix.columnCount())],
-                         ['이름', '사업1', '사업2', '사업 합계', '공백', '합계'])
-        self.assertEqual(self.matrix_texts(w), [['홍길동', '0.60000', '0.40000', '1.00000', '0.00000', '1.00000']])
+                         ['이름', '사업1', '사업2', '할당합계', '공백', '합계'])
+        self.assertEqual(self.matrix_texts(w), [['홍길동', '0.60000', '0.40000', '1.00000', '0.00000', '1.00000'],
+                                                         ['사업별합계', '0.60000', '0.40000', '1.00000', '0.00000', '1.00000']])
         self.assertEqual(self.alloc_texts(w), [['사업1', '0.60000', '사업1'], ['사업2', '0.40000', '사업2']])
         self.assertEqual(editor.year_edit.text(), '2027')
 
@@ -879,11 +914,12 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(w.project_editor.projects, [])
         self.assertEqual(len(w.people_docs), 1)
         menus = {a.text(): a.menu() for a in w.menuBar().actions()}
-        actions = {a.text(): a for a in menus['보기'].actions()}
-        self.assertEqual(actions['입력 화면'].shortcut().toString(), 'Ctrl+1')
-        actions['입력 화면'].trigger()
+        self.assertEqual([a.text() for a in menus['보기'].actions()],
+                         ['글자 크게', '글자 작게', '기본 크기'])
+        self.assertEqual(w.pages.tabPosition(), QTabWidget.West)
+        w.show_page(w.INPUT_PAGE)
         self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
-        actions['결과 화면'].trigger()
+        w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.pages.currentIndex(), w.RESULT_PAGE)
 
     # --- T32 사업 입력의 연도별 배정인력 표 ---
@@ -1174,9 +1210,9 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(editor.people_list.currentRow(), 3)
         editor.remove_person()
         self.assertEqual(len(editor.doc.people), 3)
-        self.assertEqual(w.people_editor.overview.matrix.rowCount(), 3)
+        self.assertEqual(w.people_editor.overview.matrix.rowCount(), 4)
 
-        # 휴직은 고른 사람에게만 들어간다.
+        # 공백 기간은 고른 사람에게만 들어간다.
         editor.select_person(1)
         editor.add_absence()
         editor.absences.item(0, 0).setText('2027-01-01')

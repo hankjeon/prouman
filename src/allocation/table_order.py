@@ -99,7 +99,12 @@ class TableOrderMixin:
     def mouseMoveEvent(self, event):
         position = event.position().toPoint()
         if self._drag_row is not None and event.buttons() & Qt.LeftButton:
-            if not self._row_dragging and (position - self._drag_origin).manhattanLength() >= QApplication.startDragDistance():
+            if not self._row_dragging:
+                if (position - self._drag_origin).manhattanLength() < QApplication.startDragDistance():
+                    # 라벨 셀을 누른 채 미세하게 움직여도 고무줄 다중 선택이 번지지 않게 막는다.
+                    # 단일 행 드래그 의도로 보고 super()의 확장 선택을 호출하지 않는다.
+                    event.accept()
+                    return
                 self._row_dragging = True
                 self.selectRow(self._drag_row)
                 self.viewport().setCursor(Qt.ClosedHandCursor)
