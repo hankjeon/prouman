@@ -25,6 +25,7 @@ from .storage import write_bundle
 from .rendering import issue_counts, project_summary
 from .tables import (issue_table, people_summary_table, person_detail_table, project_people_table,
                      project_summary_table)
+from .table_order import TableOrderMixin, selection_text
 
 YAML_FILTER = 'YAML 파일 (*.yaml *.yml);;모든 파일 (*)'
 KINDS = {'projects': '사업', 'people': '사람'}
@@ -81,7 +82,7 @@ class ResultTableModel(QAbstractTableModel):
         return None
 
 
-class CopyTableView(QTableView):
+class CopyTableView(TableOrderMixin, QTableView):
     """선택한 셀 범위를 탭으로 구분한 텍스트로 복사한다. 선택하지 않은 칸은 비워 둔다."""
 
     def __init__(self):
@@ -93,6 +94,7 @@ class CopyTableView(QTableView):
         self.fit_rows()
         self.setItemDelegate(SelectionDelegate(self))
         self.setModel(ResultTableModel())
+        self.init_table_order()
 
     def fit_rows(self):
         self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 8)
@@ -104,8 +106,12 @@ class CopyTableView(QTableView):
             self.fit_rows()
             self.resizeColumnsToContents()
 
-    def show_table(self, headers, rows, **options):
+    def show_table(self, headers, rows, order_context=None, footer_rows=0, **options):
+        self._ordering_update = True
         self.setModel(ResultTableModel(headers, rows, **options))
+        row_keys = {row: self.model().rows[row][0]
+                    for row in range(max(0, self.model().rowCount() - footer_rows))} if order_context else {}
+        self.configure_order(order_context, rows=row_keys)
         self.resizeColumnsToContents()
 
     def keyPressEvent(self, event):
@@ -115,15 +121,9 @@ class CopyTableView(QTableView):
         super().keyPressEvent(event)
 
     def copy_selection(self):
-        indexes = self.selectedIndexes()
-        if not indexes:
-            return ''
-        selected = {(i.row(), i.column()) for i in indexes}
-        rows = range(min(r for r, _ in selected), max(r for r, _ in selected) + 1)
-        columns = range(min(c for _, c in selected), max(c for _, c in selected) + 1)
-        model = self.model()
-        text = '\n'.join('\t'.join(model.text(r, c) if (r, c) in selected else '' for c in columns) for r in rows)
-        QGuiApplication.clipboard().setText(text)
+        text = selection_text(self, self.model().text)
+        if self.selectedIndexes():
+            QGuiApplication.clipboard().setText(text)
         return text
 
 
@@ -1052,14 +1052,16 @@ class WorkspaceWindow(QMainWindow):
             self.project_detail_label.setText(
                 f'{alias} ({item.name}) · 배정 {amount(limit)} / 할당 {amount(total)} / 잔여 {amount(limit - total)}'
                 + (' (배정 미등록)' if missing else ''))
-            self.project_people_view.show_table(*project_people_table(self.result, alias), bold_label='합계')
+            self.project_people_view.show_table(*project_people_table(self.result, alias), bold_label='합계',
+                                                order_context=('project', alias), footer_rows=1)
         else:
             self.project_detail_label.clear()
             self.project_people_view.show_table([], [])
 
     def show_person(self, name):
         if self.result is not None and name in self.result.inputs.people:
-            self.person_view.show_table(*person_detail_table(self.result, name), bold_label='합계')
+            self.person_view.show_table(*person_detail_table(self.result, name), bold_label='합계',
+                                        order_context=('person', name), footer_rows=2)
         else:
             self.person_view.show_table([], [])
 

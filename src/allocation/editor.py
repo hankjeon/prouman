@@ -14,6 +14,7 @@ from .document import (QUANTITY_HINT, AbsenceEntry, PeopleDoc, PersonEntry, Proj
                        absence_problems, person_totals, project_problems, quantity_units, to_date, valid_year,
                        year_problems)
 from .models import amount
+from .table_order import TableOrderMixin, selection_text
 
 TRANSPARENT = QColor(0, 0, 0, 0)
 BASE_ROLE, NOTE_ROLE = Qt.UserRole + 1, Qt.UserRole + 2  # 칸의 기본 배경색과 안내(오류가 없을 때 보임)
@@ -75,7 +76,7 @@ class DateDelegate(SelectionDelegate):
         model.setData(index, editor.date().toString('yyyy-MM-dd'))
 
 
-class EditTable(QTableWidget):
+class EditTable(TableOrderMixin, QTableWidget):
     """편집 가능한 표. Ctrl+C로 복사, Ctrl+V로 엑셀 범위 붙여넣기, Delete로 선택 칸 지우기를 지원한다."""
 
     def __init__(self, headers=(), stretch_last=False, row_band=False):
@@ -94,6 +95,7 @@ class EditTable(QTableWidget):
         self.date_columns = ()
         self.setItemDelegate(SelectionDelegate(self))
         self.fit_rows()
+        self.init_table_order()
 
     def set_date_columns(self, *columns):
         self.date_columns = columns
@@ -151,13 +153,10 @@ class EditTable(QTableWidget):
             super().keyPressEvent(event)
 
     def copy_selection(self):
-        cells = {(i.row(), i.column()): i.text() for i in self.selectedItems()}
-        if not cells:
-            return ''
-        rows = range(min(r for r, _ in cells), max(r for r, _ in cells) + 1)
-        columns = range(min(c for _, c in cells), max(c for _, c in cells) + 1)
-        text = '\n'.join('\t'.join(cells.get((r, c), '') for c in columns) for r in rows)
-        QGuiApplication.clipboard().setText(text)
+        text = selection_text(self, lambda row, column: self.item(row, column).text()
+                              if self.item(row, column) is not None else '')
+        if self.selectedIndexes():
+            QGuiApplication.clipboard().setText(text)
         return text
 
     def paste(self, text):
@@ -1051,7 +1050,8 @@ class PeopleOverview(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel('전체 사람의 사업 참여율입니다. 편집은 사람 입력 탭에서 합니다 '
-                                '(행을 두 번 누르면 그 사람으로 이동).'))
+                                '(행을 두 번 누르면 그 사람으로 이동). '
+                                '이름 셀을 드래그하면 행, 사업 머리글을 드래그하면 열 순서가 바뀝니다.'))
         layout.addWidget(self.matrix)
 
     def refresh(self):
@@ -1062,10 +1062,15 @@ class PeopleOverview(QWidget):
         names = {p.alias.strip(): p.name for p in projects}
         headers = ['이름'] + [alias if ok else f'{alias} (미등록)' for alias, ok in columns]
         matrix = self.matrix
+        matrix._ordering_update = True
         matrix.setColumnCount(len(headers) + 3)
         matrix.setHorizontalHeaderLabels(headers + ['사업 합계', '공백', '합계'])
         for column, (alias, ok) in enumerate(columns, 1):
-            matrix.horizontalHeaderItem(column).setToolTip(names.get(alias, '사업 목록에 없는 약칭입니다.'))
+            matrix.horizontalHeaderItem(column).setToolTip(names.get(alias, '사업 목록에 없는 약칭입니다.')
+                                                          + '\n드래그하여 사업 열 순서를 바꿀 수 있습니다.')
+        matrix.horizontalHeaderItem(0).setToolTip('사람 이름 셀을 드래그하면 행 전체가 이동합니다.')
+        for column in range(len(headers), matrix.columnCount()):
+            matrix.horizontalHeaderItem(column).setToolTip('고정 열입니다. 드래그로 이동하지 않습니다.')
         matrix.setRowCount(len(doc.people))
         for row, person in enumerate(doc.people):
             matrix.set_cell(row, 0, person.name, editable=False, problem=self.editor.name_problem(person))
@@ -1081,4 +1086,7 @@ class PeopleOverview(QWidget):
             for offset, value in enumerate((targets, absence, total)):
                 matrix.set_cell(row, base + offset, amount(value) if value is not None else '?', editable=False,
                                 computed=True, problem=self.editor.total_problem(person) if offset == 2 else '')
+        matrix.configure_order(('overview', doc.year),
+                               rows={row: person.name for row, person in enumerate(doc.people)},
+                               columns={column: alias for column, (alias, _) in enumerate(columns, 1)})
         matrix.resizeColumnsToContents()

@@ -152,6 +152,165 @@ class GuiTests(unittest.TestCase):
         model = view.model()
         return [[model.text(r, c) for c in range(model.columnCount())] for r in range(model.rowCount())]
 
+    def drag_label_row(self, view, logical_row, target_visual):
+        start = view.visualRect(view.model().index(logical_row, 0)).center()
+        target = view.verticalHeader().logicalIndex(target_visual)
+        end = view.visualRect(view.model().index(target, 0)).center()
+        QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(view.viewport(), end, 25)
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+        self.app.processEvents()
+
+    def test_copy_empty_selection_and_empty_cell_remain_distinct(self):
+        from allocation.editor import EditTable
+        from allocation.gui import CopyTableView
+        result = CopyTableView()
+        result.show_table(['빈 칸'], [['']])
+        editor = EditTable(['빈 칸'])
+        editor.setRowCount(1)
+        editor.set_cell(0, 0, '')
+        for view in (result, editor):
+            self.addCleanup(view.deleteLater)
+            QGuiApplication.clipboard().setText('이전 값')
+            view.selectAll()
+            self.assertEqual(view.copy_selection(), '')
+            self.assertEqual(QGuiApplication.clipboard().text(), '')
+            view.clearSelection()
+            QGuiApplication.clipboard().setText('유지할 값')
+            self.assertEqual(view.copy_selection(), '')
+            self.assertEqual(QGuiApplication.clipboard().text(), '유지할 값')
+
+    def test_person_detail_drag_moves_whole_rows_and_copy_order(self):
+        w = self.generated([project(), project('사업2')],
+                           [person({'사업1': '0.6', '사업2': '0.4'}), person(name='김철수')])
+        w.resize(1300, 800)
+        w.show()
+        w.result_tabs.setCurrentIndex(2)
+        w.show_person('홍길동')
+        self.app.processEvents()
+        view = w.person_view
+        original = self.texts(view)
+        self.drag_label_row(view, 0, 1)
+        self.assertEqual([view.verticalHeader().logicalIndex(i) for i in range(4)], [1, 0, 2, 3])
+        view.selectAll()
+        expected = '\n'.join('\t'.join(original[i]) for i in (1, 0, 2, 3))
+        self.assertEqual(view.copy_selection(), expected)
+        self.assertEqual(QGuiApplication.clipboard().text(), expected)
+        self.assertEqual(self.texts(view), original)  # 원본 사업·값 연결은 변하지 않는다.
+        for fixed in (2, 3):
+            self.drag_label_row(view, fixed, 0)
+            view.verticalHeader().moveSection(view.verticalHeader().visualIndex(fixed), 0)
+            self.assertEqual(view.verticalHeader().visualIndex(fixed), fixed)
+        w.show_person('김철수')
+        w.show_person('홍길동')
+        self.assertEqual(view.verticalHeader().logicalIndex(0), 1)
+        # 이동 뒤의 듬성듬성한 선택도 보이는 행 순서로 복사한다.
+        view.clearSelection()
+        for row, column in ((0, 1), (1, 2)):
+            view.selectionModel().select(view.model().index(row, column), QItemSelectionModel.Select)
+        self.assertEqual(view.copy_selection(), f'\t{original[1][2]}\n{original[0][1]}\t')
+
+    def test_project_detail_drag_keeps_total_last_and_remembers_selection(self):
+        w = self.generated([project(), project('사업2')],
+                           [person({'사업1': '0.6', '사업2': '0.4'}), person(name='김철수')])
+        w.resize(1300, 800)
+        w.show()
+        w.result_tabs.setCurrentIndex(3)
+        w.show_project_people('사업1')
+        self.app.processEvents()
+        view = w.project_people_view
+        original = self.texts(view)
+        self.drag_label_row(view, 1, 0)
+        view.selectAll()
+        self.assertEqual(view.copy_selection(), '\n'.join('\t'.join(original[i]) for i in (1, 0, 2)))
+        self.drag_label_row(view, 2, 0)
+        self.assertEqual(view.verticalHeader().logicalIndex(2), 2)
+        w.show_project_people('사업2')
+        w.show_project_people('사업1')
+        self.assertEqual(view.verticalHeader().logicalIndex(0), 1)
+        self.assertEqual(view.model().rows[2][0], '합계')
+
+    def test_overview_drag_rows_columns_copy_and_fixed_totals(self):
+        from allocation.document import dump_people
+        w = self.generated([project(), project('사업2')],
+                           [person({'사업1': '0.6', '사업2': '0.4'}), person({'사업2': '1'}, name='김철수')])
+        w.resize(1300, 800)
+        w.show()
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.OVERVIEW_TAB)
+        self.app.processEvents()
+        view = w.people_editor.overview.matrix
+        original = [[view.item(r, c).text() for c in range(6)] for r in range(2)]
+        original_doc = dump_people(w.people_editor.doc)
+        original_dirty = dict(w.people_dirty)
+        self.drag_label_row(view, 0, 1)
+        header = view.horizontalHeader()
+        # Qt의 실제 머리글 드래그로 첫 사업을 두 번째 사업 뒤로 옮긴다.
+        start = view.visualRect(view.model().index(0, 1)).center()
+        start.setY(header.height() // 2)
+        end = view.visualRect(view.model().index(0, 2)).topRight()
+        end.setY(header.height() // 2)
+        end.setX(end.x() - 3)
+        QTest.mousePress(header.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(header.viewport(), end, 25)
+        QTest.mouseRelease(header.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+        self.app.processEvents()
+        self.assertEqual([header.logicalIndex(i) for i in range(6)], [0, 2, 1, 3, 4, 5])
+        for fixed in (0, 3, 4, 5):
+            header.moveSection(header.visualIndex(fixed), 1)
+            self.assertEqual(header.visualIndex(fixed), fixed)
+        start = view.visualRect(view.model().index(0, 4)).center()
+        end = view.visualRect(view.model().index(0, 1)).center()
+        start.setY(header.height() // 2)
+        end.setY(header.height() // 2)
+        QTest.mousePress(header.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(header.viewport(), end, 25)
+        QTest.mouseRelease(header.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+        self.assertEqual(header.visualIndex(4), 4)  # 공백 열은 실제 드래그로도 이동하지 않는다.
+        header.moveSection(header.visualIndex(1), 5)  # 사업 열도 고정 영역을 넘을 수 없다.
+        self.assertEqual([header.logicalIndex(i) for i in range(6)], [0, 2, 1, 3, 4, 5])
+        view.selectAll()
+        expected = '\n'.join('\t'.join(original[r][c] for c in (0, 2, 1, 3, 4, 5)) for r in (1, 0))
+        self.assertEqual(view.copy_selection(), expected)
+        w.people_editor.overview.refresh()
+        view.selectAll()
+        self.assertEqual(view.copy_selection(), expected)
+        self.assertEqual(dump_people(w.people_editor.doc), original_doc)
+        self.assertEqual(w.people_dirty, original_dirty)
+        requested = []
+        w.people_editor.overview.person_requested.connect(requested.append)
+        QTest.mouseDClick(view.viewport(), Qt.LeftButton, Qt.NoModifier,
+                         view.visualRect(view.model().index(0, 0)).center())
+        self.assertEqual(requested[-1], 0)  # 이동한 화면 위치 대신 원래 사람을 연다.
+
+    def test_overview_order_survives_added_removed_people_and_projects(self):
+        from allocation.document import PeopleDoc, PersonEntry
+        from allocation.editor import PeopleEditor
+        projects = [ProjectEntry('사업1', '사업1'), ProjectEntry('사업2', '사업2')]
+        editor = PeopleEditor(lambda: projects)
+        self.addCleanup(editor.deleteLater)
+        editor.set_doc(PeopleDoc('2027', [PersonEntry('가', {'사업1': '1'}), PersonEntry('나', {'사업2': '1'})]))
+        view = editor.overview.matrix
+        view.verticalHeader().moveSection(0, 1)
+        view.horizontalHeader().moveSection(1, 2)
+        editor.doc.people.append(PersonEntry('다', {'사업3': '1'}))
+        projects.append(ProjectEntry('사업3', '사업3'))
+        editor.overview.refresh()
+        view.selectAll()
+        rows = [row.split('\t') for row in view.copy_selection().splitlines()]
+        self.assertEqual([row[0] for row in rows], ['나', '가', '다'])
+        self.assertEqual([view.horizontalHeaderItem(view.horizontalHeader().logicalIndex(c)).text()
+                          for c in range(7)], ['이름', '사업2', '사업1', '사업3', '사업 합계', '공백', '합계'])
+        self.assertEqual(rows[0][1:4], ['1', '', ''])
+        del editor.doc.people[0]
+        del projects[0]
+        editor.overview.refresh()
+        view.selectAll()
+        rows = [row.split('\t') for row in view.copy_selection().splitlines()]
+        self.assertEqual([row[0] for row in rows], ['나', '다'])
+        self.assertEqual([view.horizontalHeader().visualIndex(c) for c in range(3, 6)], [3, 4, 5])
+        self.assertEqual(rows[1][1:3], ['', '1'])
+
     def test_T29_generate_views_copy_excel_and_settings(self):
         w = self.generated([project(), project('사업2')],
                            [person({'사업1': '0.60000', '사업2': '0.40000'}), person({'사업2': '1'}, name='김철수')])
