@@ -219,7 +219,7 @@ class Validator:
         people = {}
         for idx, raw in enumerate(self.sequence(root.get('people', MISSING), path + '.people', True)):
             where = f'{path}.people[{idx}]'
-            item = self.mapping(raw, where, {'name', 'allocations'}, {'absences'})
+            item = self.mapping(raw, where, {'name', 'allocations'}, {'absences', 'fixed'})
             name = self.text(item.get('name', MISSING), where + '.name')
             absences = []
             for j, raw_absence in enumerate(self.sequence(item.get('absences', []), where + '.absences')):
@@ -246,10 +246,34 @@ class Validator:
                         targets[alias] = quantity
                     if check_aliases and alias not in projects:
                         self.error('E007', loc, alias, '사업 파일에 등록된 사업약칭')
+            fixed = {}
+            raw_fixed = item.get('fixed', {})
+            if type(raw_fixed) is not dict:
+                self.error('E003', where + '.fixed', raw_fixed, '사업약칭 → 1~12월 고정값 mapping')
+                raw_fixed = {}
+            seen_fixed = set()
+            for raw_alias, raw_values in raw_fixed.items():
+                loc = f'{where}.fixed[{raw_alias}]'
+                alias = self.text(raw_alias, loc, trim=True, alias=True)
+                if alias is not None:
+                    if alias in seen_fixed:
+                        self.error('E004', loc, alias, '공백 제거 후 중복 없는 고정 사업약칭')
+                    seen_fixed.add(alias)
+                    if alias not in targets:
+                        self.error('E003', loc, alias, 'allocations에 연간 목표가 있는 사업약칭')
+                    if check_aliases and alias not in projects:
+                        self.error('E007', loc, alias, '사업 파일에 등록된 사업약칭')
+                if type(raw_values) is not list or len(raw_values) != 12:
+                    self.error('E003', loc, raw_values, '1~12월 순서의 수량 12개 목록 (0도 고정)')
+                    continue
+                values = [self.quantity(value, f'{loc}[{m + 1}월]') for m, value in enumerate(raw_values)]
+                if alias is not None and None not in values:
+                    fixed[alias] = tuple(values)
             if name in people:
                 self.error('E004', where + '.name', name, '고유한 사람 이름')
             elif name is not None:
-                people[name] = Person(name, tuple(sorted(absences)), dict(sorted(targets.items())))
+                people[name] = Person(name, tuple(sorted(absences)), dict(sorted(targets.items())),
+                                      dict(sorted(fixed.items())))
         return year, dict(sorted(people.items()))
 
     def plan_people(self, value, path, projects, check_aliases=True):

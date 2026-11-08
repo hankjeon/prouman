@@ -1,0 +1,14 @@
+# 두 사업 모두 연중 수행합니다. 특정 사람의 사업2 참여만 사람 파일에서 고정합니다.
+projects:
+  - name: 연중 운영 사업
+    alias: 사업1
+    period: "2027-1-1~2027-12-31"
+    yearly:
+      2027:
+        allocated_manpower: "1.00000"
+  - name: 상반기에 참여를 마친 사업
+    alias: 사업2
+    period: "2027-1-1~2027-12-31"  # 사업 전체 기간을 줄이지 않습니다.
+    yearly:
+      2027:
+        allocated_manpower: "1.00000"

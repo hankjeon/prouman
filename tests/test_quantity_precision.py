@@ -44,8 +44,10 @@ people:
 class QuantityPrecisionTests(unittest.TestCase):
     def load_field(self, field, literal):
         projects = PROJECTS.replace('LIMIT', literal if field == 'budget' else '"1"')
-        if field in ('budget', 'actual'):
+        if field in ('budget', 'actual', 'fixed'):
             people = PEOPLE.replace('VALUE', literal if field == 'actual' else '"1"')
+            if field == 'fixed':
+                people += '    fixed:\n      사업1: [' + literal + ', ' + ', '.join(['"0"'] * 11) + ']\n'
             return load_inputs('projects.yaml', 'people.yaml', {'projects': projects, 'people': people})
         plan = (LEGACY_PLAN.replace('VALUE', literal) if field == 'legacy_result' else
                 PLAN.replace('SCORE', literal if field == 'score' else '"1"')
@@ -53,7 +55,7 @@ class QuantityPrecisionTests(unittest.TestCase):
         return load_plan('projects.yaml', 'plan.yaml', {'projects': projects, 'plan': plan})
 
     def test_all_quantity_fields_reject_excess_precision_without_rounding(self):
-        locations = {'budget': 'allocated_manpower', 'actual': 'allocations',
+        locations = {'budget': 'allocated_manpower', 'actual': 'allocations', 'fixed': 'fixed',
                      'score': 'draft', 'plan_result': 'allocations', 'legacy_result': 'allocations'}
         for field, location in locations.items():
             for value in ('0.123456', '0.000001', '0.500000', '1.000000', '1000.000010'):
@@ -69,7 +71,7 @@ class QuantityPrecisionTests(unittest.TestCase):
                         self.assertIn('자동으로 반올림하지 않습니다', errors[0].hint)
 
     def test_all_quantity_fields_accept_five_places_or_less(self):
-        for field in ('budget', 'actual', 'score', 'plan_result', 'legacy_result'):
+        for field in ('budget', 'actual', 'fixed', 'score', 'plan_result', 'legacy_result'):
             for value in ('0', '0.0', '0.00000', '0.00001', '0.12345', '0.5', '1.00000'):
                 for quoted in (False, True):
                     with self.subTest(field=field, value=value, quoted=quoted):

@@ -681,6 +681,14 @@ class PeopleEditor(QWidget):
         self.add_row_button, self.remove_row_button = QPushButton('행 추가'), QPushButton('행 삭제')
         self.add_row_button.clicked.connect(self.add_row)
         self.remove_row_button.clicked.connect(self.remove_row)
+        self.add_fixed_button = QPushButton('선택 사업 월 고정')
+        self.add_fixed_button.clicked.connect(self.add_fixed)
+        self.fixed = EditTable(['사업'] + [f'{m}월' for m in range(1, 13)] + ['고정 합계'])
+        self.fixed.itemChanged.connect(self.fixed_edited)
+        self.remove_fixed_button = QPushButton('선택 고정 해제')
+        self.remove_fixed_button.clicked.connect(self.remove_fixed)
+        self.fixed_panel = titled('월별 고정 — 0도 고정하며, 12개월 합계는 연간 참여율과 같아야 합니다.',
+                                  self.fixed, button_row(self.remove_fixed_button))
         self.absences = EditTable(['시작일', '종료일', '사유'], stretch_last=True)
         self.absences.set_date_columns(0, 1)
         self.absences.itemChanged.connect(self.absence_edited)
@@ -689,10 +697,11 @@ class PeopleEditor(QWidget):
         self.remove_absence_button.clicked.connect(self.remove_absence)
         right = QSplitter(Qt.Vertical)
         right.addWidget(titled(self.title, self.allocations, self.totals,
-                               button_row(self.add_row_button, self.remove_row_button)))
+                               button_row(self.add_row_button, self.remove_row_button, self.add_fixed_button)))
+        right.addWidget(self.fixed_panel)
         right.addWidget(titled('휴직 기간', self.absences,
                                button_row(self.add_absence_button, self.remove_absence_button)))
-        right.setSizes([450, 250])
+        right.setSizes([350, 200, 250])
 
         year_row = QHBoxLayout()
         year_row.addWidget(QLabel('관리 연도'))
@@ -775,7 +784,9 @@ class PeopleEditor(QWidget):
     def mark_person(self, index):
         """합계가 맞지 않거나 이름에 문제가 있는 사람은 목록에서 붉게 표시한다."""
         person, item = self.doc.people[index], self.people_list.item(index)
-        problem = self.name_problem(person) or self.total_problem(person) or self.row_problem(person)
+        problem = (self.name_problem(person) or self.total_problem(person) or self.row_problem(person)
+                   or next((self.fixed_problem(person, alias) for alias in person.fixed
+                            if self.fixed_problem(person, alias)), ''))
         self.people_list.blockSignals(True)
         # 정상은 기본 글자색(시스템 테마)으로 둔다. 검은색을 고정하면 다크에서 안 보인다.
         if problem:
@@ -898,7 +909,7 @@ class PeopleEditor(QWidget):
         names = {p.alias.strip(): p.name for p in self.projects()}
         for row, (alias, value) in enumerate(rows):
             table.set_cell(row, self.PROJECT, alias, problem=self.row_problem(person, alias),
-                           note=names.get(alias, ''))
+                           note=names.get(alias, '') + ('\n월별 고정값이 있습니다.' if alias in person.fixed else ''))
             rate = QUANTITY_HINT if value and quantity_units(value) is None else (
                 '참여율을 입력하세요.' if not value else '')
             table.set_cell(row, self.RATE, value, problem=rate)
@@ -906,10 +917,11 @@ class PeopleEditor(QWidget):
         table.blockSignals(False)
         table.resizeColumnsToContents()
         for button in (self.add_row_button, self.remove_row_button, self.add_absence_button,
-                       self.remove_absence_button):
+                       self.remove_absence_button, self.add_fixed_button, self.remove_fixed_button):
             button.setEnabled(person is not None)
         self.show_totals()
         self.show_absences()
+        self.show_fixed()
 
     def show_totals(self):
         person = self.current()
@@ -926,12 +938,20 @@ class PeopleEditor(QWidget):
 
     def allocation_edited(self, item):
         person = self.current()
+        if person is None:
+            return
         row, text = item.row(), item.text().strip()
+        if not 0 <= row < len(person.allocations):
+            return
         alias = list(person.allocations)[row]
         if item.column() == self.PROJECT_NAME:
             return
         if item.column() == self.PROJECT:
             if text == alias:
+                return
+            if alias in person.fixed:
+                self.message.setText('월 고정 사업을 다른 사업으로 바꾸려면 먼저 월 고정을 해제하세요.')
+                self.show_person()
                 return
             if text in person.allocations:
                 self.message.setText(f'{person.name}에게 "{text}" 사업이 이미 있습니다.')
@@ -962,7 +982,11 @@ class PeopleEditor(QWidget):
         person, row = self.current(), self.allocations.currentRow()
         if person is None or not 0 <= row < len(person.allocations):
             return
-        person.allocations.pop(list(person.allocations)[row])
+        alias = list(person.allocations)[row]
+        if alias in person.fixed:
+            self.message.setText('월 고정 사업의 참여율 행을 삭제하려면 먼저 월 고정을 해제하세요.')
+            return
+        person.allocations.pop(alias)
         self.show_person()
         self.mark_person(self.people_list.currentRow())
         self.notify()
@@ -971,13 +995,15 @@ class PeopleEditor(QWidget):
 
     def count_alias(self, alias, doc=None):
         target = self.doc if doc is None else doc
-        return sum(1 for person in target.people if person.allocations.get(alias, '').strip())
+        return sum(1 for person in target.people if person.allocations.get(alias, '').strip() or alias in person.fixed)
 
     def rename_alias(self, old, new, doc=None):
         target = self.doc if doc is None else doc
         for person in target.people:
             if old in person.allocations and not person.allocations.get(new):
                 person.allocations = rename_key({k: v for k, v in person.allocations.items() if k != new}, old, new)
+            if old in person.fixed and new not in person.fixed:
+                person.fixed = rename_key(person.fixed, old, new)
         if target is self.doc:
             self.refresh()
 
@@ -985,8 +1011,87 @@ class PeopleEditor(QWidget):
         target = self.doc if doc is None else doc
         for person in target.people:
             person.allocations.pop(alias, None)
+            person.fixed.pop(alias, None)
         if target is self.doc:
             self.refresh()
+
+    # --- 월별 고정 ---
+
+    @staticmethod
+    def fixed_problem(person, alias):
+        if alias not in person.allocations:
+            return '고정 사업의 연간 참여율을 allocations에 입력하세요.'
+        units = [quantity_units(value) for value in person.fixed[alias]]
+        if len(units) != 12 or None in units:
+            return '고정값은 소수 5자리 이하의 비음수 수량 12개여야 합니다.'
+        target = quantity_units(person.allocations[alias])
+        if target is not None and sum(units) != target:
+            return f'고정 합계 {amount(sum(units))}와 연간 참여율 {amount(target)}이 다릅니다.'
+        return ''
+
+    def show_fixed(self):
+        person = self.current()
+        entries = list(person.fixed.items()) if person else []
+        self.fixed.blockSignals(True)
+        self.fixed.setRowCount(len(entries))
+        for row, (alias, values) in enumerate(entries):
+            problem = self.fixed_problem(person, alias)
+            self.fixed.set_cell(row, 0, alias, editable=False, problem=problem)
+            for month, value in enumerate(values):
+                self.fixed.set_cell(row, month + 1, value,
+                                    problem=QUANTITY_HINT if quantity_units(value) is None else problem)
+            units = [quantity_units(value) for value in values]
+            self.fixed.set_cell(row, 13, amount(sum(units)) if None not in units else '?',
+                                editable=False, computed=True, problem=problem)
+        self.fixed.blockSignals(False)
+        self.fixed.resizeColumnsToContents()
+        self.fixed_panel.setVisible(bool(entries))
+
+    def add_fixed(self):
+        person, row = self.current(), self.allocations.currentRow()
+        if person is None or not 0 <= row < len(person.allocations):
+            self.message.setText('참여 사업 표에서 월별로 고정할 사업을 먼저 선택하세요.')
+            return
+        alias = list(person.allocations)[row]
+        if not alias:
+            self.message.setText('먼저 사업을 선택하세요.')
+            return
+        if alias not in person.fixed:
+            person.fixed[alias] = ['0.00000'] * 12
+            self.mark_person(self.people_list.currentRow())
+            self.notify()
+        self.show_person()
+        self.fixed.setCurrentCell(list(person.fixed).index(alias), 1)
+
+    def fixed_edited(self, item):
+        person = self.current()
+        if person is None or not 0 <= item.row() < len(person.fixed) or not 1 <= item.column() <= 12:
+            return
+        alias = list(person.fixed)[item.row()]
+        person.fixed[alias][item.column() - 1] = item.text().strip()
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
+        # 편집 중인 셀을 다시 만들지 않고 안내 색만 갱신한다.
+        problem = self.fixed_problem(person, alias)
+        self.fixed.blockSignals(True)
+        try:
+            units = [quantity_units(value) for value in person.fixed[alias]]
+            self.fixed.item(item.row(), 13).setText(amount(sum(units)) if None not in units else '?')
+            for column in range(14):
+                value = self.fixed.item(item.row(), column).text()
+                self.fixed.mark(item.row(), column,
+                                QUANTITY_HINT if 1 <= column <= 12 and quantity_units(value) is None else problem)
+        finally:
+            self.fixed.blockSignals(False)
+
+    def remove_fixed(self):
+        person, row = self.current(), self.fixed.currentRow()
+        if person is None or not 0 <= row < len(person.fixed):
+            return
+        person.fixed.pop(list(person.fixed)[row])
+        self.show_person()
+        self.mark_person(self.people_list.currentRow())
+        self.notify()
 
     # --- 휴직 ---
 
@@ -1004,6 +1109,8 @@ class PeopleEditor(QWidget):
 
     def absence_edited(self, item):
         person = self.current()
+        if person is None or not 0 <= item.row() < len(person.absences):
+            return
         entry = person.absences[item.row()]
         setattr(entry, ('start', 'end', 'reason')[item.column()], item.text().strip())
         problems = absence_problems(person.absences)

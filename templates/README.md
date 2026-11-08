@@ -29,6 +29,7 @@ templates/
   07_multi_year/           # people_2026.yaml, people_2027.yaml, people_2028.yaml
   08_whitespace/
   09_warnings/
+  18_fixed_months/         # 사람별 사업 12개월 고정과 잔여 월 배분
   errors/
     10_target_total/
     11_project_limit/
@@ -90,6 +91,7 @@ Windows에서는 `python`으로 실행하거나 `.venv/Scripts/python.exe` 경�
 | [07_multi_year](07_multi_year/projects.yaml) | 하나의 사업 파일과 3개 연도 입력, 연도별 상한·제외 월 | 세 연도 모두 오류·경고 없음, 종료 0 |
 | [08_whitespace](08_whitespace/projects.yaml) | 사업명 중간 공백 유지, 사업명·약칭·참조의 앞뒤 공백 제거 | 오류·경고 없음, 종료 0 |
 | [09_warnings](09_warnings/people/people_2027.yaml) | 중복 제외 월, 기간 밖 연도, 연도 경계·중복 휴직, 0·미등록 배정 | W001~W005, 경고 6건, 오류 0건, 종료 0 |
+| [18_fixed_months](18_fixed_months/people/people_2027.yaml) | 특정 사람의 사업 월별 값 고정, 나머지 사업만 잔여 배분 | 사업1의 1~6월 W006 6건, 오류 없음, 종료 0 |
 | [errors/10_target_total](errors/10_target_total/people/people_2027.yaml) | 개인 연간 목표 부족 | E101, 종료 1 |
 | [errors/11_project_limit](errors/11_project_limit/projects.yaml) | 사람별 합계는 맞지만 사업 전체 상한 초과 | E103, 종료 1 |
 | [errors/12_joint_capacity](errors/12_joint_capacity/projects.yaml) | 개별 사업은 가능해도 공동 허용 월 부족 | E201, 종료 1 |
@@ -119,3 +121,5 @@ year: 2027  # 값 뒤의 주석입니다.
 - `excluded_months`는 선택 항목이다. 제외 월이 없으면 생략하거나 `[]`로 적는다. 사업 배정인력은 상한이며 미소진은 정상이다.
 - 필드의 문법과 오타는 조용히 무시되지 않는다. 같은 mapping 키를 반복하거나 설명용 임의 필드를 추가하지 말고 주석을 사용한다.
 - 값 자체에 ` #`가 들어가야 하면 `name: "연구 #1"`처럼 따옴표로 감싼다. 따옴표 안의 `#`는 주석이 아니다.
+
+`fixed`는 실적 사람 파일에 선택적으로 사용한다. 12개월 값 합계는 해당 allocations와 같아야 하며 0·최소치 미만도 고정이다. GUI에서 파일을 열면 사람 입력의 월별 고정 표로 편집·저장할 수 있다.

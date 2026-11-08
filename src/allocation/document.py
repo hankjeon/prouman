@@ -54,6 +54,7 @@ class PersonEntry:
     name: str = ''
     allocations: dict = field(default_factory=dict)  # 사업약칭 → 참여율 문자열
     absences: list = field(default_factory=list)
+    fixed: dict = field(default_factory=dict)  # 사업약칭 → 1~12월 고정 수량 문자열
 
 
 @dataclass
@@ -162,18 +163,33 @@ def read_people(text):
     """사람 YAML을 (PeopleDoc, 무시한 항목)으로 읽는다."""
     reader = _Reader()
     root = reader.mapping(reader.parse(text), 'people.yaml', {'year', 'stage', 'people'})
+    if 'fixed' in root:
+        raise DocumentError('fixed는 파일 최상위가 아니라 people의 각 사람 아래 allocations와 같은 깊이에 둡니다.')
     if 'stage' in root and root['stage'] != 'confirmed':
         raise DocumentError('확정 사람 파일은 stage: confirmed여야 합니다.')
     doc = PeopleDoc(reader.scalar(root.get('year'), 'year'), [])
     for idx, raw in enumerate(reader.sequence(root.get('people'), 'people')):
         where = f'people[{idx}]'
-        item = reader.mapping(raw, where, {'name', 'allocations', 'absences'})
+        item = reader.mapping(raw, where, {'name', 'allocations', 'absences', 'fixed'})
         person = PersonEntry(reader.scalar(item.get('name'), where + '.name'))
         for key, value in reader.mapping(item.get('allocations'), where + '.allocations').items():
             alias = reader.scalar(key, where + '.allocations').strip()
             if alias in person.allocations:
                 raise DocumentError(f'{where}.allocations: 공백 제거 후 중복된 사업약칭 {alias}')
             person.allocations[alias] = reader.scalar(value, f'{where}.allocations[{alias}]').strip()
+        raw_fixed = item.get('fixed', {})
+        if type(raw_fixed) is not dict:
+            raise DocumentError(f'{where}.fixed: 사업약칭과 월 고정값의 mapping이 필요합니다.')
+        if 'fixed' in item and any('중복 키' in message for message in reader.dropped):
+            raise DocumentError('월 고정값이 있는 파일의 중복 YAML 키를 먼저 수정하세요.')
+        for key, values in raw_fixed.items():
+            alias = reader.scalar(key, where + '.fixed').strip()
+            if alias in person.fixed:
+                raise DocumentError(f'{where}.fixed: 공백 제거 후 중복된 사업약칭 {alias}')
+            if type(values) is not list or len(values) != 12:
+                raise DocumentError(f'{where}.fixed[{alias}]: 1~12월 고정값 12개 목록이 필요합니다.')
+            person.fixed[alias] = [reader.scalar(value, f'{where}.fixed[{alias}][{m + 1}월]')
+                                   for m, value in enumerate(values)]
         for j, raw_absence in enumerate(reader.sequence(item.get('absences'), where + '.absences')):
             loc = f'{where}.absences[{j}]'
             absence = reader.mapping(raw_absence, loc, {'period', 'reason'})
@@ -291,9 +307,13 @@ def dump_people(doc):
         allocations = {alias: value for alias, value in person.allocations.items() if value.strip()}
         if not allocations:
             lines.append('    allocations: {}')
-            continue
-        lines.append('    allocations:')
-        lines += [f'      {_text(alias)}: {_text(value.strip())}' for alias, value in allocations.items()]
+        else:
+            lines.append('    allocations:')
+            lines += [f'      {_text(alias)}: {_text(value.strip())}' for alias, value in allocations.items()]
+        if person.fixed:
+            lines.append('    fixed:')
+            lines += [f'      {_text(alias)}: [{", ".join(_text(value) for value in values)}]'
+                      for alias, values in person.fixed.items()]
     return '\n'.join(lines) + '\n'
 
 

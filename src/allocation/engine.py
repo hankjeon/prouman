@@ -80,8 +80,33 @@ def calculate(inputs, issues=()):
         capacities = [base - absence for base, absence in zip(BASE, result.absence[name])]
         allowed = {alias: allowed_months(inputs.projects[alias], year) &
                    {m for m, capacity in enumerate(capacities) if capacity > 0} for alias in person.targets}
+        reserved = [0] * 12
+        fixed_errors = []
+        for alias, row in person.fixed.items():
+            where = f'{inputs.people_file}: {name} / {alias} / {year}'
+            total = sum(row)
+            if total != person.targets[alias]:
+                fixed_errors.append(Issue('ERROR', 'E104', where,
+                    f'고정 월 합계 {amount(total)}, 연간 목표 {amount(person.targets[alias])}',
+                    '고정 월 합계 = allocations 연간 목표', '월 고정값 또는 연간 목표를 확인하세요. 자동 보정하지 않습니다.'))
+            for month, value in enumerate(row):
+                reserved[month] += value
+                if value and month not in allowed[alias]:
+                    fixed_errors.append(Issue('ERROR', 'E105', f'{where} / {month + 1}월',
+                        f'고정 {amount(value)}', '수행 기간·제외 월·개인 공백 조건상 허용되지 않는 월은 0',
+                        '사업 기간·제외 월·휴직과 월 고정값을 확인하세요.'))
+        for month, (value, capacity) in enumerate(zip(reserved, capacities)):
+            if value > capacity:
+                fixed_errors.append(Issue('ERROR', 'E105', f'{inputs.people_file}: {name} / {year}년 {month + 1}월',
+                    f'고정 합계 {amount(value)}, 월 가용량 {amount(capacity)}', '고정 합계 ≤ 개인 월 가용량',
+                    '여러 고정 사업의 해당 월 값과 개인 공백을 확인하세요.'))
+        if fixed_errors:
+            result.issues.extend(fixed_errors)
+            continue
+        targets = {alias: target for alias, target in person.targets.items() if alias not in person.fixed}
+        free_allowed = {alias: allowed[alias] for alias in targets}
         # 허용 월이 전혀 없는 양수 목표는 연간 합계와 무관한 원인이므로 사업 단위로 따로 알린다.
-        empty = [alias for alias, target in person.targets.items() if target and not allowed[alias]]
+        empty = [alias for alias, target in targets.items() if target and not allowed[alias]]
         if empty:
             result.issues.append(Issue('ERROR', 'E201', f'{inputs.people_file}: {name} / {year}',
                 ', '.join(f'{alias} 목표 {amount(person.targets[alias])}: 허용 월 없음' for alias in empty),
@@ -90,22 +115,24 @@ def calculate(inputs, issues=()):
             continue  # 원인을 고친 뒤 나머지 사업의 배분 가능성을 다시 판정한다.
         if sum(person.targets.values()) != sum(capacities):
             continue  # 합계가 잘못된 입력의 배분 가능성 진단은 의미가 없다.
-        values, shortage, cut_projects, cut_months = transport(person.targets, allowed, capacities,
+        remaining = [capacity - value for capacity, value in zip(capacities, reserved)]
+        values, shortage, cut_projects, cut_months = transport(targets, free_allowed, remaining,
                                                               minimum=MONTHLY_MINIMUM)
         if values is None:
             result.issues.append(Issue('ERROR', 'E201', f'{inputs.people_file}: {name} / {year}',
-                f'목표 {amount(sum(person.targets.values()))}, 부족 {amount(shortage)}; '
+                f'미고정 목표 {amount(sum(targets.values()))}, 부족 {amount(shortage)}; '
                 f'충돌 사업 {cut_projects}, 허용 월 {cut_months}',
                 '모든 사업 목표를 허용 월의 개인 가용량에 배분 가능',
-                '충돌 사업의 목표·수행 기간·제외 월·공백을 확인하세요.'))
+                '충돌 사업의 목표·수행 기간·제외 월·공백과 월 고정 배정을 확인하세요.'))
         else:
-            result.allocations[name] = values
+            result.allocations[name] = {alias: list(person.fixed[alias]) if alias in person.fixed else values[alias]
+                                        for alias in person.targets}
     if not result.has_errors:
         result.issues.extend(validate_result(result))
     if not result.has_errors:
         for name, person in inputs.people.items():
             for alias, target in person.targets.items():
-                if target == 0:
+                if target == 0 or alias in person.fixed:
                     continue
                 for month in sorted(allowed_months(inputs.projects[alias], year)):
                     value = result.allocations[name][alias][month]
@@ -141,6 +168,8 @@ def validate_result(result):
                 continue
             if sum(row) != person.targets[alias]:
                 violations.append(f'{name}/{alias}: 고정 연간 목표 불일치')
+            if alias in person.fixed and tuple(row) != tuple(person.fixed[alias]):
+                violations.append(f'{name}/{alias}: 월 고정값 변경')
             project_totals[alias] += sum(row)
         if any(len(row) != 12 for row in rows.values()):
             continue
@@ -148,8 +177,10 @@ def validate_result(result):
         if tuple(totals) != BASE or any(sum(totals[q:q + 3]) != 25000 for q in (0, 3, 6, 9)) or sum(totals) != 100000:
             violations.append(f'{name}: 월·분기·연간 합계 불일치')
         if len(violations) == prior_violations:
-            allowed = {alias: allowed_months(inputs.projects[alias], inputs.year) for alias in rows}
-            if minimum_can_improve(person.targets, allowed, rows, MONTHLY_MINIMUM):
+            free_rows = {alias: row for alias, row in rows.items() if alias not in person.fixed}
+            free_targets = {alias: person.targets[alias] for alias in free_rows}
+            allowed = {alias: allowed_months(inputs.projects[alias], inputs.year) for alias in free_rows}
+            if minimum_can_improve(free_targets, allowed, free_rows, MONTHLY_MINIMUM):
                 violations.append(f'{name}: 월별 최소 배정 부족을 더 줄일 수 있음')
     for alias, total in project_totals.items():
         budget = inputs.projects[alias].yearly.get(inputs.year)

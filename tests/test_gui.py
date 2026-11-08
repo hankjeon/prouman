@@ -147,6 +147,124 @@ class GuiTests(unittest.TestCase):
         window.generate()
         return window
 
+    def capture_slot_errors(self):
+        from unittest.mock import patch
+        errors = []
+        hook = patch('sys.excepthook', side_effect=lambda kind, value, traceback: errors.append(value))
+        hook.start()
+        self.addCleanup(hook.stop)
+        self.addCleanup(self.assertEqual, errors, [])
+
+    def fixed_input(self):
+        from test_fixed_allocations import HALF_YEAR
+        data = person({'사업1': '0.5', '사업2': '0.5'})
+        data['fixed'] = {'사업2': list(HALF_YEAR)}
+        return data
+
+    def test_fixed_import_has_no_dropped_warning_and_pages_remain_usable(self):
+        from allocation.engine import BASE
+        self.capture_slot_errors()
+        p, h = self.write([project(), project('사업2')], [self.fixed_input()])
+        w = self.window()
+        w.resize(1400, 900)
+        w.show()
+        w.run_import([str(p), str(h)])
+        self.assertEqual(self.warnings, [])
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.PEOPLE_TAB)
+        self.app.processEvents()
+        editor = w.people_editor
+        self.assertTrue(editor.fixed_panel.isVisible())
+        self.assertEqual(editor.fixed.rowCount(), 1)
+        self.assertEqual(editor.fixed.item(0, 1).text(), '0.08333')
+        self.assertEqual(editor.fixed.item(0, 12).text(), '0.00000')
+        self.assertEqual(editor.fixed.item(0, 13).text(), '0.50000')
+        self.assertFalse(editor.fixed.item(0, 13).flags() & Qt.ItemIsEditable)
+        QTest.mouseClick(w.pages.tabBar(), Qt.LeftButton, Qt.NoModifier,
+                         w.pages.tabBar().tabRect(w.RESULT_PAGE).center())
+        self.assertIsNotNone(w.result)
+        self.assertFalse(w.result.has_errors, w.issues)
+        self.assertEqual(w.result.allocations['홍길동']['사업2'], list(BASE[:6]) + [0] * 6)
+        QTest.mouseClick(w.pages.tabBar(), Qt.LeftButton, Qt.NoModifier,
+                         w.pages.tabBar().tabRect(w.INPUT_PAGE).center())
+        w.input_tabs.setCurrentIndex(w.PEOPLE_TAB)
+        self.assertTrue(editor.fixed_panel.isVisible())
+        self.assertEqual(editor.people_list.currentItem().text(), '홍길동')
+
+    def test_fixed_sum_error_is_editable_and_malformed_import_preserves_ui(self):
+        self.capture_slot_errors()
+        data = self.fixed_input()
+        data['fixed']['사업2'][-1] = '0.00001'
+        p, h = self.write([project(), project('사업2')], [data])
+        w = self.window()
+        errors, dropped = w.import_files([str(p), str(h)])
+        self.assertEqual((errors, dropped), ([], []))
+        w.show_page(w.RESULT_PAGE)
+        self.assertIsNone(w.result)
+        self.assertIn('E104', [i.code for i in w.issues])
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.PEOPLE_TAB)
+        self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
+        w.people_editor.fixed.item(0, 12).setText('0.000000')
+        self.assertEqual(w.people_editor.fixed.item(0, 13).text(), '?')
+        w.show_page(w.RESULT_PAGE)
+        self.assertIn('E005', [i.code for i in w.issues])
+        self.assertIsNone(w.result)
+        w.show_page(w.INPUT_PAGE)
+        self.assertEqual(w.people_editor.fixed.item(0, 12).text(), '0.000000')
+        w.people_editor.fixed.item(0, 12).setText('0.00000')
+        w.show_page(w.RESULT_PAGE)
+        self.assertIsNotNone(w.result)
+        self.assertFalse(w.result.has_errors)
+        old_doc = w.people_editor.doc
+        data['fixed']['사업2'] = ['0'] * 11
+        h.write_text(yaml.safe_dump({'year': 2027, 'people': [data]}, allow_unicode=True), encoding='utf-8')
+        w.run_import([str(h)])
+        self.assertIn('12개', self.warnings[-1][1])
+        self.assertIs(w.people_editor.doc, old_doc)
+        misplaced = {'year': 2027, 'people': [person({'사업1': '1'})], 'fixed': {'사업2': ['0'] * 12}}
+        h.write_text(yaml.safe_dump(misplaced, allow_unicode=True), encoding='utf-8')
+        w.run_import([str(h)])
+        self.assertIn('각 사람 아래', self.warnings[-1][1])
+        self.assertIs(w.people_editor.doc, old_doc)
+        w.show_page(w.INPUT_PAGE)
+        w.show_page(w.RESULT_PAGE)
+        self.assertIsNotNone(w.result)
+
+    def test_fixed_edit_save_rename_unlock_and_recreate(self):
+        from allocation.document import read_people
+        from test_fixed_allocations import HALF_YEAR
+        self.capture_slot_errors()
+        p, h = self.write([project(), project('사업2')], [self.fixed_input()])
+        w = self.window()
+        w.import_files([str(p), str(h)])
+        w.show_page(w.INPUT_PAGE)
+        editor = w.people_editor
+        editor.allocations.setCurrentCell(1, editor.PROJECT)
+        editor.remove_row()
+        self.assertIn('고정', editor.message.text())
+        self.assertIn('사업2', editor.doc.people[0].allocations)
+        w.project_editor.table.item(1, 1).setText('새사업')
+        self.assertIn('새사업', editor.doc.people[0].fixed)
+        self.assertNotIn('사업2', editor.doc.people[0].fixed)
+        output = self.path / 'fixed-output'
+        self.assertTrue(w.export_all(str(output)))
+        restored, dropped = read_people((output / 'people/people_2027.yaml').read_text(encoding='utf-8'))
+        self.assertEqual(dropped, [])
+        self.assertEqual(restored.people[0].fixed['새사업'], HALF_YEAR)
+        editor.fixed.setCurrentCell(0, 1)
+        editor.remove_fixed()
+        self.assertEqual(editor.doc.people[0].fixed, {})
+        editor.allocations.setCurrentCell(1, editor.PROJECT)
+        editor.add_fixed()
+        self.assertEqual(editor.doc.people[0].fixed['새사업'], ['0.00000'] * 12)
+        editor.fixed.setCurrentCell(0, 1)
+        editor.fixed.paste('\t'.join(HALF_YEAR))
+        self.assertEqual(editor.doc.people[0].fixed['새사업'], HALF_YEAR)
+        w.show_page(w.RESULT_PAGE)
+        self.assertIsNotNone(w.result)
+        self.assertFalse(w.result.has_errors)
+
     @staticmethod
     def texts(view):
         model = view.model()

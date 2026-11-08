@@ -493,7 +493,7 @@ class WorkspaceWindow(QMainWindow):
 
     def remove_alias_everywhere(self, alias):
         for year, doc in self.people_docs.items():
-            if any(alias in person.allocations for person in doc.people):
+            if any(alias in person.allocations or alias in person.fixed for person in doc.people):
                 self.people_editor.remove_alias(alias, doc)
                 self.set_people_dirty(year, True)
         for year, doc in self.plan_docs.items():
@@ -619,7 +619,10 @@ class WorkspaceWindow(QMainWindow):
         self.select_year(doc.year)
         self.show_page(self.INPUT_PAGE)
         self.input_tabs.setCurrentIndex(self.PEOPLE_TAB)
-        self.statusBar().showMessage('실적 할당값을 참고 점수로 복사했습니다. 사업 조건과 휴직 날짜를 확인하세요.')
+        message = '실적 할당값을 참고 점수로 복사했습니다. 사업 조건과 휴직 날짜를 확인하세요.'
+        if any(person.fixed for person in people.people):
+            message += ' 이전 연도의 월 고정값은 복사하지 않았습니다.'
+        self.statusBar().showMessage(message)
         return True
 
     def run_import(self, paths):

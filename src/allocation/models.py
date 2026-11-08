@@ -32,6 +32,7 @@ class Person:
     name: str
     absences: tuple[tuple[date, date], ...]
     targets: dict[str, int]
+    fixed: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
