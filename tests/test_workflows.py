@@ -282,7 +282,7 @@ HAS_QT = importlib.util.find_spec('PySide6') is not None
 if HAS_QT:
     from PySide6.QtCore import QSettings, Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QMessageBox, QTabWidget
     from allocation.gui import MainWindow
 
 
@@ -314,35 +314,45 @@ class WorkflowGuiTests(unittest.TestCase):
 
     def test_NP01_mode_tabs_menu_and_isolated_project_documents(self):
         window = self.window
-        self.assertEqual([button.text() for button in window.mode_buttons], ['실적작업', '계획작업'])
+        self.assertEqual([window.mode_combo.itemText(i) for i in range(window.mode_combo.count())],
+                         ['실적작업', '계획작업'])
         self.assertEqual([window.actual.pages.tabText(i) for i in range(2)], ['입력', '결과'])
+        self.assertEqual(window.actual.pages.tabPosition(), QTabWidget.West)
         menus = {a.text(): a.menu() for a in window.menuBar().actions()}
-        self.assertEqual([a.text() for a in menus['파일'].actions()], ['새로 만들기', '불러오기', '저장', '내보내기', '종료'])
+        self.assertEqual([a.text() for a in menus['파일'].actions()],
+                         ['새로 만들기', '불러오기', '저장', '실적 파일에서 계획 준비', '내보내기', '종료'])
+        self.assertEqual([a.text() for a in menus['보기'].actions()], ['글자 크게', '글자 작게', '기본 크기'])
         plan = self.prepare()
         self.assertEqual(window.actual.project_editor.projects, [])
         window.set_mode(window.PLANNING)
+        self.assertEqual(window.mode_combo.currentIndex(), window.PLANNING)
         plan.project_editor.projects[0].name = '계획에서만 수정'
         window.set_mode(window.ACTUAL)
+        self.assertEqual(window.mode_combo.currentIndex(), window.ACTUAL)
         self.assertEqual(window.actual.project_editor.projects, [])
         window.set_mode(window.PLANNING)
         self.assertEqual(plan.project_editor.projects[0].name, '계획에서만 수정')
         self.assertEqual(plan.planning_page.doc.people[0].draft['A'], '0.9')
 
-    def test_NP01_actual_mode_buttons_and_file_actions_route_to_active_workspace(self):
+    def test_NP01_actual_mode_combo_and_file_actions_route_to_active_workspace(self):
         window = self.window
         window.show()
-        QTest.mouseClick(window.mode_buttons[window.PLANNING], Qt.LeftButton)
+        window.mode_combo.setCurrentIndex(window.PLANNING)
         self.assertIs(window.active_workspace, window.plan)
         calls = []
         window.plan.browse_save_plan = lambda: calls.append('save-plan')
         window.plan.browse_export = lambda: calls.append('export-plan')
+        window.plan.browse_prepare_plan = lambda: calls.append('prepare-plan') or True
         window.actual.browse_export = lambda: calls.append('export-actual')
         actions = {a.text(): a for a in window.menuBar().actions()[0].menu().actions()}
+        self.assertTrue(actions['실적 파일에서 계획 준비'].isEnabled())
+        actions['실적 파일에서 계획 준비'].trigger()
         actions['저장'].trigger()
         actions['내보내기'].trigger()
-        QTest.mouseClick(window.mode_buttons[window.ACTUAL], Qt.LeftButton)
+        window.mode_combo.setCurrentIndex(window.ACTUAL)
+        self.assertFalse(actions['실적 파일에서 계획 준비'].isEnabled())
         actions['저장'].trigger()
-        self.assertEqual(calls, ['save-plan', 'export-plan', 'export-actual'])
+        self.assertEqual(calls, ['prepare-plan', 'save-plan', 'export-plan', 'export-actual'])
         self.assertEqual(window.actual.pages.currentIndex(), 0)
         window.actual.pages.setCurrentIndex(1)
         self.assertTrue(window.actual.issue_view.model().rowCount())

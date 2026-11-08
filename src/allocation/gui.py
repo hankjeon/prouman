@@ -8,9 +8,9 @@ from pathlib import Path
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt,
                             qInstallMessageHandler)
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog,
                                QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton,
-                               QSplitter, QStackedWidget, QTableView, QTabWidget, QToolButton,
+                               QSplitter, QStackedWidget, QTableView, QTabWidget,
                                QVBoxLayout, QWidget)
 
 from . import theme
@@ -137,7 +137,7 @@ def find_projects_file(people_path):
 
 
 class WorkspaceWindow(QMainWindow):
-    """왼쪽 메뉴로 입력 화면(파일·표 편집)과 결과 화면(계산 결과·엑셀 저장)을 바꾼다.
+    """서쪽 탭으로 입력 화면(표 편집)과 결과 화면(계산 결과·엑셀 저장)을 바꾼다.
 
     결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
 
@@ -167,25 +167,9 @@ class WorkspaceWindow(QMainWindow):
         self.setWindowTitle('인력 배분')
         self.resize(1280, 800)
 
-        # 입력 화면: 불러오기·내보내기·새로 만들기, 열린 문서 목록, 사업·사람 입력 탭
-        import_button = QPushButton('불러오기')
-        import_button.clicked.connect(self.browse_import)
-        export_button = QPushButton('내보내기')
-        export_button.clicked.connect(self.browse_export)
-        new_button = QPushButton('새로 만들기')
-        new_button.clicked.connect(self.new_all)
+        # 입력 화면: 열린 문서 목록, 사업·사람 입력 탭 (파일 명령은 메뉴가 맡는다)
         self.projects_label = QLabel()
         files_row = QHBoxLayout()
-        files_row.addWidget(import_button)
-        files_row.addWidget(export_button)
-        files_row.addWidget(new_button)
-        if planning:
-            save_button = QPushButton('저장 — 중간 저장')
-            save_button.clicked.connect(self.browse_save_plan)
-            prepare_button = QPushButton('실적 파일에서 계획 준비')
-            prepare_button.clicked.connect(self.browse_prepare_plan)
-            files_row.addWidget(save_button)
-            files_row.addWidget(prepare_button)
         files_row.addStretch()
         files_row.addWidget(self.projects_label)
         self.year_combo = QComboBox()
@@ -279,7 +263,9 @@ class WorkspaceWindow(QMainWindow):
         layout.addWidget(self.result_tabs)
 
         # 각 업무는 입력·결과 두 탭만 사용한다. 작업 모드 전환은 바깥 창이 맡는다.
+        # 입력·결과 전환은 좌측 세로(서쪽) 탭으로 둔다.
         self.pages = QTabWidget()
+        self.pages.setTabPosition(QTabWidget.West)
         self.pages.addTab(input_page, '입력')
         self.pages.addTab(self.planning_page if planning else result_page, '결과')
         if planning:
@@ -310,13 +296,6 @@ class WorkspaceWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, slot=slot: slot())
             file_menu.addAction(action)
         view_menu = self.menuBar().addMenu('보기')
-        for page, text, key in ((self.INPUT_PAGE, '입력 화면', 'Ctrl+1'),
-                                (self.RESULT_PAGE, '결과 화면', 'Ctrl+2')):
-            action = QAction(text, self)
-            action.setShortcut(QKeySequence(key))
-            action.triggered.connect(lambda checked=False, page=page: self.show_page(page))
-            view_menu.addAction(action)
-        view_menu.addSeparator()
         for text, keys, step in (('글자 크게', [QKeySequence.ZoomIn, QKeySequence('Ctrl+=')], 1),
                                  ('글자 작게', [QKeySequence.ZoomOut], -1),
                                  ('기본 크기', [QKeySequence('Ctrl+0')], 0)):
@@ -1117,19 +1096,6 @@ class MainWindow(QMainWindow):
                            WorkspaceWindow(_ModeSettings(self.settings, 'planning'), planning=True)]
         self.actual, self.plan = self.workspaces
         self.mode_stack = QStackedWidget()
-        row = QHBoxLayout()
-        row.addWidget(QLabel('작업 선택'))
-        self.mode_group = QButtonGroup(self)
-        self.mode_buttons = []
-        for index, label in enumerate(('실적작업', '계획작업')):
-            button = QToolButton()
-            button.setText(label)
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, index=index: self.set_mode(index))
-            self.mode_group.addButton(button, index)
-            self.mode_buttons.append(button)
-            row.addWidget(button)
-        row.addStretch()
         for workspace in self.workspaces:
             workspace.menuBar().hide()
             for action in workspace.findChildren(QAction):
@@ -1139,20 +1105,33 @@ class MainWindow(QMainWindow):
             self.mode_stack.addWidget(workspace)
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addLayout(row)
         layout.addWidget(self.mode_stack)
         self.setCentralWidget(central)
+        mode_corner = QWidget(self.menuBar())
+        corner_layout = QHBoxLayout(mode_corner)
+        corner_layout.setContentsMargins(0, 0, 8, 0)
+        corner_layout.addWidget(QLabel('작업모드'))
+        self.mode_combo = QComboBox(mode_corner)
+        self.mode_combo.addItems(('실적작업', '계획작업'))
+        self.mode_combo.currentIndexChanged.connect(lambda index: self.set_mode(index))
+        corner_layout.addWidget(self.mode_combo)
+        self.menuBar().setCornerWidget(mode_corner, Qt.TopRightCorner)
+        self.mode_corner = mode_corner  # 코너 위젯의 C++ 수명을 창과 함께 유지한다.
         file_menu = self.menuBar().addMenu('파일')
         for label, key, callback in (
                 ('새로 만들기', QKeySequence.New, lambda: self.active_workspace.new_all()),
                 ('불러오기', QKeySequence.Open, lambda: self.active_workspace.browse_import()),
                 ('저장', QKeySequence.Save, self.save_current),
+                ('실적 파일에서 계획 준비', None, self.prepare_current),
                 ('내보내기', 'Ctrl+Shift+S', lambda: self.active_workspace.browse_export()),
                 ('종료', QKeySequence.Quit, self.close)):
             action = QAction(label, self)
-            action.setShortcut(QKeySequence(key))
+            if key is not None:
+                action.setShortcut(QKeySequence(key))
             action.triggered.connect(lambda checked=False, callback=callback: callback())
             file_menu.addAction(action)
+            if label == '실적 파일에서 계획 준비':
+                self.prepare_action = action
         mode_menu = self.menuBar().addMenu('작업')
         for index, label in enumerate(('실적작업', '계획작업')):
             action = QAction(label, self)
@@ -1160,12 +1139,6 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, index=index: self.set_mode(index))
             mode_menu.addAction(action)
         view_menu = self.menuBar().addMenu('보기')
-        for page, label in enumerate(('입력', '결과')):
-            action = QAction(label, self)
-            action.setShortcut(QKeySequence(f'Ctrl+{page + 1}'))
-            action.triggered.connect(lambda checked=False, page=page: self.active_workspace.show_page(page))
-            view_menu.addAction(action)
-        view_menu.addSeparator()
         for label, keys, step in (('글자 크게', ['Ctrl++', 'Ctrl+='], 1),
                                   ('글자 작게', ['Ctrl+-'], -1), ('기본 크기', ['Ctrl+0'], 0)):
             action = QAction(label, self)
@@ -1182,9 +1155,18 @@ class MainWindow(QMainWindow):
     def set_mode(self, mode):
         mode = mode if mode in (self.ACTUAL, self.PLANNING) else self.ACTUAL
         self.mode_stack.setCurrentIndex(mode)
-        self.mode_buttons[mode].setChecked(True)
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(mode)
+        self.mode_combo.blockSignals(False)
+        self.prepare_action.setEnabled(mode == self.PLANNING)
         self.setWindowTitle('인력 배분 — ' + ('계획작업' if mode else '실적작업'))
         self.settings.setValue('work_mode', mode)
+
+    def prepare_current(self):
+        workspace = self.active_workspace
+        if not workspace.planning:
+            return
+        workspace.browse_prepare_plan()
 
     def save_current(self):
         workspace = self.active_workspace
