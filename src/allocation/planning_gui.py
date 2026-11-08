@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
-from .document import (AbsenceEntry, PlanDoc, PlanPersonEntry, dump_plan, dump_projects, quantity_units,
+from .document import (QUANTITY_HINT, AbsenceEntry, PlanDoc, PlanPersonEntry, dump_plan, dump_projects, quantity_units,
                        to_date, valid_year)
 from .editor import EditTable, ProjectDelegate
 from .loading import load_plan
@@ -364,7 +364,7 @@ class PlanningPage(QWidget):
                 units = quantity_units(value) if value != '' else 0
                 problem = ''
                 if value and units is None:
-                    problem = '소수 5자리 이하의 비음수 수량을 입력하세요.'
+                    problem = QUANTITY_HINT
                     invalid.add(alias)
                 elif units is not None:
                     total += units

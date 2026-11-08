@@ -15,7 +15,7 @@ from datetime import date
 import yaml
 
 from .engine import absence_units
-from .loading import QUANTITY_PATTERN, Loader, migrate_plan_person, parse_date
+from .loading import QUANTITY_HINT, QUANTITY_PATTERN, Loader, migrate_plan_person, parse_date
 from .models import Person
 
 HEADER = '# 인력 배분 GUI에서 저장한 파일입니다.'
@@ -346,7 +346,6 @@ def valid_year(text):
 
 
 DATE_HINT = '날짜를 YYYY-MM-DD 형식으로 입력하세요 (예: 2026-03-01).'
-QUANTITY_HINT = '0 이상, 소수 5자리 이하 숫자를 입력하세요 (예: 0.5).'
 
 
 def project_problems(projects):

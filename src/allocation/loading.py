@@ -24,6 +24,8 @@ class Missing:
 
 MISSING = Missing()
 QUANTITY_PATTERN = re.compile(r'[0-9]+(?:\.[0-9]{1,5})?')
+QUANTITY_HINT = ('0 이상, 소수 5자리 이하 숫자를 입력하세요 (예: 0.5). '
+                 '소수 6자리 이상은 끝자리가 0이어도 오류이며 자동으로 반올림하지 않습니다.')
 
 
 def migrate_plan_person(item):
@@ -151,7 +153,8 @@ class Validator:
     def quantity(self, value, where):
         if (not (type(value) is str or isinstance(value, Number) and value.kind in ('int', 'float'))
                 or not QUANTITY_PATTERN.fullmatch(value)):
-            self.error('E005', where, value, '소수 5자리 이하의 비음수 십진수 (지수 표기 불가)')
+            self.error('E005', where, value, '소수 5자리 이하의 비음수 십진수 (지수 표기 불가)',
+                       QUANTITY_HINT)
             return None
         with localcontext() as context:
             context.prec = max(28, len(value) + 6)
