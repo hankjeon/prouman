@@ -2,6 +2,12 @@
 
 이 문서는 세션별 결정·실제 작업·검증·다음 할 일을 이어서 기록한다. 최신 세션을 위에 둔다. 기존 기능별 이력은 `docs/development-log.md`에 남아 있으며 이 문서로 소급해 옮기지 않는다. `완료`는 실제 수행·확인한 작업에만 사용한다.
 
+## 2026-11-09 — 실적 입력 순서 기능 GitHub 게시
+
+- 사용자 요청에 따라 로컬 `main`과 `origin/main`의 선행 차이 0/0을 fetch 후 확인했다. 순서 기능·종합 표 표시 수정 관련 소스·문서·테스트 12개 파일만 `feat/input-order-yaml-20261109`에 스테이징해 `50936db`로 커밋·푸시했다. 미추적 업무 파일 `myteam/people/people_2027.yaml`은 제외하고 보존했다.
+- Windows Qt offscreen 전체 테스트는 게시 전 190개 실행·184개 통과·Linux Bash용 6개 건너뜀. `git diff --cached --check` 통과. 실제 Windows 마우스 조작과 배포 EXE는 이번 게시에서 검증하거나 갱신하지 않았다.
+- PR #7(https://github.com/hankjeon/prouman/pull/7)의 병합 가능·상태 검사 없음·head `50936db`를 확인해 merge 방식으로 병합했다. GitHub에서 `merged: true`, 병합 커밋 `3e31e32faf024f941829ac9a9aeae12a7af1d4c9`를 확인했다. 원격 fetch 후 로컬 `main`을 `origin/main`으로 fast-forward 했다. 최종 게시 기록은 이 항목의 별도 문서 커밋으로 남긴다.
+
 ## 2026-11-09 — 입력 순서 변경 후 종합 표 표시 순서 수정
 
 - 사용자 재현: 사업 입력·사람 입력에서 순서를 바꿔도 종합 표의 화면 순서가 그대로였다. 원인은 종합 표의 문서 데이터는 새 순서로 갱신되지만, 이전 표시 순서 캐시가 재적용된 것이다.
