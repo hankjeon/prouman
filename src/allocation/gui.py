@@ -211,6 +211,7 @@ class WorkspaceWindow(QMainWindow):
         self.project_editor.alias_renamed.connect(self.alias_renamed)
         self.project_editor.alias_removed.connect(self.remove_alias_everywhere)
         self.people_editor.changed.connect(self.people_changed)
+        self.people_editor.overview.projects_order_requested.connect(self.project_editor.reorder_projects)
         self.input_tabs = QTabWidget()
         self.input_tabs.addTab(self.project_editor, '사업 입력')
         if planning:

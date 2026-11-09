@@ -425,8 +425,9 @@ class AcceptanceTests(unittest.TestCase):
         p = self.cli('--all')
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         headings = ['개인별 연간 요약 (사업 / 공백 / 합계)', '사업별 연간 요약 (배정 / 할당 / 잔여)',
-                    '개인 상세: 김철수', '개인 상세: 홍길동',
-                    '사업 상세: 미할당사업 (미할당사업)', '사업 상세: 사업1 (사업1)', '사업 상세: 사업2 (사업2)']
+                    '개인 상세: 홍길동', '개인 상세: 김철수',
+                    '사업 상세: 사업1 (사업1)', '사업 상세: 사업2 (사업2)',
+                    '사업 상세: 미할당사업 (미할당사업)']
         positions = []
         lines = p.stdout.splitlines()
         for heading in headings:
@@ -605,7 +606,7 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_T30_editor_document_round_trip(self):
         # GUI 편집기 형식으로 읽고 다시 쓴 YAML이 원본과 같은 입력·결과·진단을 만든다. 저장소 예제는 읽기만 한다.
-        from allocation.document import dump_people, dump_projects, read_people, read_projects
+        from allocation.document import detect_kind, dump_people, dump_projects, read_people, read_projects
         from allocation.loading import decode_text
         folders = [ROOT / 'myteam', *sorted((ROOT / 'templates').glob('[0-9]*')),
                    *sorted((ROOT / 'templates' / 'errors').glob('[0-9]*'))]
@@ -613,6 +614,8 @@ class AcceptanceTests(unittest.TestCase):
         for folder in folders:
             p = folder / 'projects.yaml'
             for h in sorted((folder / 'people').glob('*.yaml')):
+                if detect_kind(decode_text(h.read_bytes())) == 'plan':
+                    continue  # 계획 파일은 확정 사람 문서의 왕복 대상이 아니다.
                 with self.subTest(people=str(h.relative_to(ROOT))):
                     projects, dropped = read_projects(decode_text(p.read_bytes()))
                     doc, dropped_people = read_people(decode_text(h.read_bytes()))

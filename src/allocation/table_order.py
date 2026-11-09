@@ -140,5 +140,9 @@ class TableOrderMixin:
         self.viewport().unsetCursor()
         if dragging:
             event.accept()
+            committed = getattr(self, 'row_order_committed', None)
+            if committed is not None:
+                committed([self._row_keys[logical] for logical in
+                           sorted(self._row_keys, key=self.verticalHeader().visualIndex)])
         else:
             super().mouseReleaseEvent(event)

@@ -4,7 +4,7 @@ from datetime import date
 
 from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
                                QStyleFactory, QToolButton, QVBoxLayout, QWidget)
@@ -171,6 +171,53 @@ class EditTable(TableOrderMixin, QTableWidget):
                     item.setText(value.strip())
 
 
+class OrderedPeopleList(QListWidget):
+    """이름 항목 하나를 잡아 목록 안에서 순서를 옮긴다."""
+
+    order_changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._drag_item = None
+        self._drag_start = None
+        self._moved = False
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self._drag_item = self.itemAt(event.position().toPoint()) if event.button() == Qt.LeftButton else None
+        self._drag_start = event.position().toPoint()
+        self._moved = False
+
+    def mouseMoveEvent(self, event):
+        if self._drag_item is not None and event.buttons() & Qt.LeftButton:
+            position = event.position().toPoint()
+            if not self._moved and (position - self._drag_start).manhattanLength() < QApplication.startDragDistance():
+                event.accept()
+                return
+            target = self.itemAt(position)
+            if target is not None and target is not self._drag_item:
+                target_row = self.row(target)
+                item = self.takeItem(self.row(self._drag_item))
+                self.insertItem(target_row, item)
+                self.setCurrentItem(item)
+                self._moved = True
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        moved = self._moved
+        self._drag_item = None
+        self._drag_start = None
+        self._moved = False
+        if moved:
+            event.accept()
+            self.order_changed.emit()
+        else:
+            super().mouseReleaseEvent(event)
+
+
 def button_row(*buttons):
     row = QHBoxLayout()
     for button in buttons:
@@ -231,6 +278,7 @@ class ProjectEditor(QWidget):
         self.year_start = self.base_year()
         self.excluded_year = self.managed_year_number()
         self.table = EditTable(['사업명', '약칭', '시작일', '종료일', '총 배정'], row_band=True)
+        self.table.row_order_committed = self.reorder_project_rows
         self.table.set_date_columns(self.START, self.END)
         self.table.horizontalHeader().setSectionResizeMode(self.NAME, QHeaderView.Stretch)
         self.grid = EditTable([''] * (self.YEARS + 1), row_band=True)
@@ -387,6 +435,27 @@ class ProjectEditor(QWidget):
         if projects:
             self.table.setCurrentCell(0, 0)
 
+    def reorder_projects(self, aliases):
+        if len(aliases) != len(self.projects):
+            return
+        current = [project.alias for project in self.projects]
+        if aliases == current:
+            return
+        lookup = {project.alias: project for project in self.projects}
+        if len(lookup) != len(aliases) or set(lookup) != set(aliases):
+            return
+        self.reorder_project_rows([self.projects.index(lookup[alias]) for alias in aliases])
+
+    def reorder_project_rows(self, rows):
+        if rows == list(range(len(self.projects))) or sorted(rows) != list(range(len(self.projects))):
+            return
+        selected = self.current()
+        self.projects[:] = [self.projects[row] for row in rows]
+        self.refresh()
+        if selected is not None:
+            self.table.setCurrentCell(self.projects.index(selected), self.NAME)
+        self.changed.emit()
+
     def current(self):
         row = self.table.currentRow()
         return self.projects[row] if 0 <= row < len(self.projects) else None
@@ -407,6 +476,7 @@ class ProjectEditor(QWidget):
             self.table.set_cell(row, self.TOTAL, '', editable=False, computed=True)
             self.update_total(row)
         self.table.blockSignals(False)
+        self.table.configure_order(None, rows={row: row for row in range(len(self.projects))})
         self.table.resizeColumnsToContents()
         self.remove_button.setEnabled(bool(self.projects))
         self.refresh_grid()
@@ -661,7 +731,8 @@ class PeopleEditor(QWidget):
         self.year_edit.setMaximumWidth(120)
         self.year_edit.textEdited.connect(self.year_edited)
 
-        self.people_list = QListWidget()
+        self.people_list = OrderedPeopleList()
+        self.people_list.order_changed.connect(self.people_rows_moved)
         self.people_list.currentRowChanged.connect(lambda row: self.show_person())
         self.people_list.itemChanged.connect(self.name_edited)
         self.add_button, self.remove_button = QPushButton('사람 추가'), QPushButton('사람 삭제')
@@ -728,6 +799,30 @@ class PeopleEditor(QWidget):
         self.refresh()
         if doc.people:
             self.people_list.setCurrentRow(0)
+
+    def people_rows_moved(self, *args):
+        names = [self.people_list.item(row).text() for row in range(self.people_list.count())]
+        if names == [person.name for person in self.doc.people]:
+            return
+        lookup = {person.name: person for person in self.doc.people}
+        if len(lookup) != len(names) or set(lookup) != set(names):
+            return
+        self.doc.people[:] = [lookup[name] for name in names]
+        self.overview.refresh()
+        self.changed.emit()
+
+    def reorder_people(self, names):
+        if names == [person.name for person in self.doc.people]:
+            return
+        lookup = {person.name: person for person in self.doc.people}
+        if len(lookup) != len(names) or set(lookup) != set(names):
+            return
+        selected = self.current()
+        self.doc.people[:] = [lookup[name] for name in names]
+        self.refresh()
+        if selected is not None:
+            self.people_list.setCurrentRow(self.doc.people.index(selected))
+        self.changed.emit()
 
     def current(self):
         row = self.people_list.currentRow()
@@ -1147,11 +1242,14 @@ class PeopleOverview(QWidget):
     """사람 × 사업 참여율 종합 표(읽기 전용). 행을 두 번 누르면 그 사람의 입력 화면으로 간다."""
 
     person_requested = Signal(int)
+    projects_order_requested = Signal(list)
 
     def __init__(self, editor):
         super().__init__()
         self.editor = editor
         self.matrix = EditTable()
+        self.matrix.row_order_committed = self.editor.reorder_people
+        self.matrix.horizontalHeader().viewport().installEventFilter(self)
         self.matrix.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.matrix.cellDoubleClicked.connect(self._double_clicked)
         layout = QVBoxLayout(self)
@@ -1161,6 +1259,19 @@ class PeopleOverview(QWidget):
                                 '이름 셀을 드래그하면 행, 사업 머리글을 드래그하면 열 순서가 바뀝니다. '
                                 '맨 아래 사업별합계 행은 고정 행입니다.'))
         layout.addWidget(self.matrix)
+
+    def eventFilter(self, watched, event):
+        if watched is self.matrix.horizontalHeader().viewport() and event.type() == QEvent.MouseButtonRelease:
+            QTimer.singleShot(0, self.commit_project_order)
+        return super().eventFilter(watched, event)
+
+    def commit_project_order(self):
+        matrix = self.matrix
+        keys = matrix._column_keys
+        aliases = [keys[logical] for logical in sorted(keys, key=matrix.horizontalHeader().visualIndex)]
+        known = [project.alias.strip() for project in self.editor.projects() if project.alias.strip()]
+        if len(known) == len(aliases) and set(known) == set(aliases) and known != aliases:
+            self.projects_order_requested.emit(aliases)
 
     def _double_clicked(self, row, column):
         """합계 행을 두 번 눌러도 사람 입력 화면으로 이동하지 않는다."""
@@ -1233,6 +1344,8 @@ class PeopleOverview(QWidget):
                                                   (business + absence_total, bad_business or bad_absence))):
                 matrix.set_cell(total_row, base + offset, '?' if bad else amount(value), editable=False,
                                 computed=True)
+        # 종합은 별도 표시 순서를 갖지 않는다. 입력 문서의 목록 순서가 항상 기준이다.
+        matrix._order_cache.pop(('overview', doc.year), None)
         matrix.configure_order(('overview', doc.year),
                                rows={row: person.name for row, person in enumerate(doc.people)},
                                columns={column: alias for column, (alias, _) in enumerate(columns, 1)})
