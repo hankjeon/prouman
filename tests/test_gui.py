@@ -396,7 +396,9 @@ class GuiTests(unittest.TestCase):
         QTest.mouseMove(header.viewport(), end, 25)
         QTest.mouseRelease(header.viewport(), Qt.LeftButton, Qt.NoModifier, end)
         self.app.processEvents()
-        self.assertEqual([header.logicalIndex(i) for i in range(6)], [0, 2, 1, 3, 4, 5])
+        self.assertEqual([p.alias for p in w.project_editor.projects], ['사업2', '사업1'])
+        self.assertEqual([p.name for p in w.people_editor.doc.people], ['김철수', '홍길동'])
+        self.assertEqual([header.logicalIndex(i) for i in range(6)], list(range(6)))
         for fixed in (0, 3, 4, 5):
             header.moveSection(header.visualIndex(fixed), 1)
             self.assertEqual(header.visualIndex(fixed), fixed)
@@ -409,20 +411,20 @@ class GuiTests(unittest.TestCase):
         QTest.mouseRelease(header.viewport(), Qt.LeftButton, Qt.NoModifier, end)
         self.assertEqual(header.visualIndex(4), 4)  # 공백 열은 실제 드래그로도 이동하지 않는다.
         header.moveSection(header.visualIndex(1), 5)  # 사업 열도 고정 영역을 넘을 수 없다.
-        self.assertEqual([header.logicalIndex(i) for i in range(6)], [0, 2, 1, 3, 4, 5])
+        self.assertEqual([header.logicalIndex(i) for i in range(6)], list(range(6)))
         view.selectAll()
         expected = '\n'.join('\t'.join(original[r][c] for c in (0, 2, 1, 3, 4, 5)) for r in (1, 0, 2))
         self.assertEqual(view.copy_selection(), expected)
         w.people_editor.overview.refresh()
         view.selectAll()
         self.assertEqual(view.copy_selection(), expected)
-        self.assertEqual(dump_people(w.people_editor.doc), original_doc)
-        self.assertEqual(w.people_dirty, original_dirty)
+        self.assertNotEqual(dump_people(w.people_editor.doc), original_doc)
+        self.assertNotEqual(w.people_dirty, original_dirty)
         requested = []
         w.people_editor.overview.person_requested.connect(requested.append)
         QTest.mouseDClick(view.viewport(), Qt.LeftButton, Qt.NoModifier,
                          view.visualRect(view.model().index(0, 0)).center())
-        self.assertEqual(requested[-1], 0)  # 이동한 화면 위치 대신 원래 사람을 연다.
+        self.assertEqual(requested[-1], 0)
         before = list(requested)
         totals_visual = view.verticalHeader().visualIndex(2)
         self.assertEqual(totals_visual, 2)  # 합계 행은 맨 아래에 고정한다.
@@ -441,8 +443,8 @@ class GuiTests(unittest.TestCase):
         self.addCleanup(editor.deleteLater)
         editor.set_doc(PeopleDoc('2027', [PersonEntry('가', {'사업1': '1'}), PersonEntry('나', {'사업2': '1'})]))
         view = editor.overview.matrix
-        view.verticalHeader().moveSection(0, 1)
-        view.horizontalHeader().moveSection(1, 2)
+        editor.reorder_people(['나', '가'])
+        projects[:] = [projects[1], projects[0]]
         editor.doc.people.append(PersonEntry('다', {'사업3': '1'}))
         projects.append(ProjectEntry('사업3', '사업3'))
         editor.overview.refresh()
@@ -453,8 +455,8 @@ class GuiTests(unittest.TestCase):
                           for c in range(7)], ['이름', '사업2', '사업1', '사업3', '할당합계', '공백', '합계'])
         self.assertEqual(rows[0][1:4], ['1', '', ''])
         self.assertEqual(rows[3], ['사업별합계', '1.00000', '1.00000', '1.00000', '3.00000', '0.00000', '3.00000'])
-        del editor.doc.people[0]
-        del projects[0]
+        del editor.doc.people[1]
+        del projects[1]
         editor.overview.refresh()
         view.selectAll()
         rows = [row.split('\t') for row in view.copy_selection().splitlines()]
@@ -462,6 +464,52 @@ class GuiTests(unittest.TestCase):
         self.assertEqual([view.horizontalHeader().visualIndex(c) for c in range(3, 6)], [3, 4, 5])
         self.assertEqual(rows[1][1:3], ['', '1'])
         self.assertEqual(rows[2], ['사업별합계', '1.00000', '1.00000', '2.00000', '0.00000', '2.00000'])
+
+    def test_input_drag_order_reaches_saved_yaml_and_excel(self):
+        w = self.generated([project(), project('사업2')],
+                           [person({'사업1': '0.6', '사업2': '0.4'}), person({'사업2': '1'}, name='김철수')])
+        w.resize(1300, 800)
+        w.show()
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.PROJECTS_TAB)
+        self.app.processEvents()
+        self.drag_label_row(w.project_editor.table, 0, 1)
+        self.assertEqual([p.alias for p in w.project_editor.projects], ['사업2', '사업1'])
+        self.assertTrue(w.projects_dirty)
+        overview = w.people_editor.overview.matrix
+        self.assertEqual([overview.horizontalHeaderItem(overview.horizontalHeader().logicalIndex(v)).text()
+                          for v in (1, 2)], ['사업2', '사업1'])
+        w.input_tabs.setCurrentIndex(w.PEOPLE_TAB)
+        people = w.people_editor.people_list
+        first = people.visualItemRect(people.item(0)).center()
+        second = people.visualItemRect(people.item(1)).bottomRight()
+        second.setX(first.x())
+        QTest.mousePress(people.viewport(), Qt.LeftButton, Qt.NoModifier, first)
+        QTest.mouseMove(people.viewport(), second, 25)
+        QTest.mouseRelease(people.viewport(), Qt.LeftButton, Qt.NoModifier, second)
+        self.app.processEvents()
+        self.assertEqual([p.name for p in w.people_editor.doc.people], ['김철수', '홍길동'])
+        self.assertTrue(w.people_dirty['2027'])
+        self.assertEqual([overview.item(r, 0).text() for r in range(2)], ['김철수', '홍길동'])
+        self.assertEqual([overview.horizontalHeaderItem(c).text() for c in (1, 2)], ['사업2', '사업1'])
+        self.assertEqual([overview.item(overview.verticalHeader().logicalIndex(v), 0).text()
+                          for v in range(2)], ['김철수', '홍길동'])
+        self.assertEqual([overview.horizontalHeaderItem(overview.horizontalHeader().logicalIndex(v)).text()
+                          for v in (1, 2)], ['사업2', '사업1'])
+        w.generate()
+        self.assertEqual([w.person_list.item(i).text() for i in range(2)], ['김철수', '홍길동'])
+        self.assertEqual([w.project_list.item(i).text() for i in range(2)], ['사업2', '사업1'])
+        self.assertTrue(w.save_excel(str(self.path / 'ordered.xlsx')))
+        book = load_workbook(self.path / 'ordered.xlsx')
+        self.assertEqual([book['요약'].cell(r, 1).value for r in (2, 3)], ['김철수', '홍길동'])
+        self.assertEqual([book['사업상세'].cell(r, 1).value for r in (2, 3)], ['사업2', '사업1'])
+        folder = self.path / 'saved'
+        folder.mkdir()
+        self.assertTrue(w.export_all(str(folder)))
+        projects = yaml.safe_load((folder / 'projects.yaml').read_text(encoding='utf-8'))
+        people_yaml = yaml.safe_load((folder / 'people' / 'people_2027.yaml').read_text(encoding='utf-8'))
+        self.assertEqual([p['alias'] for p in projects['projects']], ['사업2', '사업1'])
+        self.assertEqual([p['name'] for p in people_yaml['people']], ['김철수', '홍길동'])
 
     def test_T29_generate_views_copy_excel_and_settings(self):
         w = self.generated([project(), project('사업2')],
@@ -483,10 +531,12 @@ class GuiTests(unittest.TestCase):
         self.assertIn('배정 10.00000 / 할당 0.60000 / 잔여 9.40000', w.project_detail_label.text())
 
         # 사람을 고르면 사업·공백·합계 표가 나오고 합계 행은 굵게 표시한다.
-        self.assertEqual([w.person_list.item(i).text() for i in range(w.person_list.count())], ['김철수', '홍길동'])
+        self.assertEqual([w.person_list.item(i).text() for i in range(w.person_list.count())], ['홍길동', '김철수'])
         self.assertEqual(w.person_list.currentRow(), 0)
-        self.assertEqual([row[0] for row in self.texts(w.person_view)], ['사업2', '공백', '합계'])
+        self.assertEqual([row[0] for row in self.texts(w.person_view)], ['사업1', '사업2', '공백', '합계'])
         w.person_list.setCurrentRow(1)
+        self.assertEqual([row[0] for row in self.texts(w.person_view)], ['사업2', '공백', '합계'])
+        w.person_list.setCurrentRow(0)
         detail = self.texts(w.person_view)
         self.assertEqual([row[0] for row in detail], ['사업1', '사업2', '공백', '합계'])
         self.assertEqual(detail[0][1:4], ['0.05000', '0.05000', '0.05000'])
@@ -536,8 +586,8 @@ class GuiTests(unittest.TestCase):
         aliases = [w.project_list.item(i).text() for i in range(w.project_list.count())]
         w.project_list.setCurrentRow(aliases.index('사업1'))
         rows = self.texts(w.project_people_view)
-        self.assertEqual([row[0] for row in rows], ['김철수', '홍길동', '합계'])
-        for row, name in zip(rows[:2], ('김철수', '홍길동')):
+        self.assertEqual([row[0] for row in rows], ['홍길동', '김철수', '합계'])
+        for row, name in zip(rows[:2], ('홍길동', '김철수')):
             from allocation.models import amount
             values = w.result.allocations[name]['사업1']
             self.assertEqual(row[1:], [amount(v) for v in values] + [amount(sum(values))])
@@ -548,7 +598,7 @@ class GuiTests(unittest.TestCase):
                                                       QItemSelectionModel.SelectionFlag.Select)
         self.assertEqual(w.project_people_view.copy_selection(), rows[0][1])
         w.project_list.setCurrentRow(aliases.index('사업2'))
-        self.assertEqual([row[0] for row in self.texts(w.project_people_view)], ['김철수', '이영희', '홍길동', '합계'])
+        self.assertEqual([row[0] for row in self.texts(w.project_people_view)], ['홍길동', '김철수', '이영희', '합계'])
         w.project_list.setCurrentRow(aliases.index('빈사업'))
         self.assertEqual(self.texts(w.project_people_view), [['합계'] + ['0.00000'] * 13])
         w.people_editor.doc.people[0].allocations = {}  # 오류 계산 시 이전 상세를 지운다.

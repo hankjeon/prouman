@@ -29,7 +29,7 @@ def person_summary(result, name):
 
 def person_table(result, name):
     rows = result.allocations[name]
-    table = [(alias, rows[alias]) for alias in sorted(rows)]
+    table = [(alias, rows[alias]) for alias in result.inputs.projects if alias in rows]
     table.append(('공백', result.absence[name]))
     table.append(('합계', [result.absence[name][m] + sum(row[m] for row in rows.values()) for m in range(12)]))
     return table
@@ -44,7 +44,7 @@ def project_summary(result, alias):
 
 
 def project_people(result, alias):
-    return [(name, result.allocations[name][alias]) for name in sorted(result.allocations)
+    return [(name, result.allocations[name][alias]) for name in result.inputs.people
             if alias in result.allocations[name] and sum(result.allocations[name][alias]) > 0]
 
 

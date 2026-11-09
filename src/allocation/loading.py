@@ -206,7 +206,7 @@ class Validator:
                 self.error('E004', where + '.alias', alias, '공백 제거 후 고유한 사업약칭')
             elif name is not None and alias is not None and period:
                 projects[alias] = Project(name, alias, *period, budgets)
-        return dict(sorted(projects.items()))
+        return projects
 
     def people(self, value, path, projects, check_aliases=True):
         root = self.mapping(value, path, {'year', 'people'}, {'stage'})
@@ -271,7 +271,7 @@ class Validator:
             elif name is not None:
                 people[name] = Person(name, tuple(sorted(absences)), dict(sorted(targets.items())),
                                       dict(sorted(fixed.items())))
-        return year, dict(sorted(people.items()))
+        return year, people
 
     def plan_people(self, value, path, projects, check_aliases=True):
         root = self.mapping(value, path, {'year', 'stage', 'people'})
