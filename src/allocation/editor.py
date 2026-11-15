@@ -2,7 +2,7 @@
 from bisect import bisect_left
 from datetime import date
 
-from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QItemSelection, QItemSelectionModel, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
@@ -1248,7 +1248,7 @@ class PeopleOverview(QWidget):
         super().__init__()
         self.editor = editor
         self.matrix = EditTable()
-        self.matrix.row_order_committed = self.editor.reorder_people
+        self.matrix.row_order_committed = self.commit_people_order
         self.matrix.horizontalHeader().viewport().installEventFilter(self)
         self.matrix.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.matrix.cellDoubleClicked.connect(self._double_clicked)
@@ -1265,13 +1265,44 @@ class PeopleOverview(QWidget):
             QTimer.singleShot(0, self.commit_project_order)
         return super().eventFilter(watched, event)
 
+    def commit_people_order(self, names):
+        self._commit_order(True, names, self.editor.reorder_people)
+
+    def _commit_order(self, vertical, order, commit):
+        """문서를 재배열하며 표를 다시 그려도 선택·현재 셀은 같은 항목을 따른다."""
+        matrix = self.matrix
+        keys = dict(matrix._row_keys if vertical else matrix._column_keys)
+        selected = [(index.row(), index.column()) for index in matrix.selectedIndexes()]
+        current = (matrix.currentRow(), matrix.currentColumn())
+        commit(order)
+        new_keys = matrix._row_keys if vertical else matrix._column_keys
+        positions = {key: logical for logical, key in new_keys.items()}
+
+        def restored_index(row, column):
+            if vertical:
+                row = positions.get(keys[row], -1) if row in keys else row
+            else:
+                column = positions.get(keys[column], -1) if column in keys else column
+            return matrix.model().index(row, column)
+
+        selection = QItemSelection()
+        for row, column in selected:
+            index = restored_index(row, column)
+            if index.isValid():
+                selection.select(index, index)
+        model = matrix.selectionModel()
+        model.setCurrentIndex(restored_index(*current), QItemSelectionModel.NoUpdate)
+        model.select(selection, QItemSelectionModel.ClearAndSelect)
+        if matrix.currentIndex().isValid():
+            matrix.scrollTo(matrix.currentIndex())
+
     def commit_project_order(self):
         matrix = self.matrix
         keys = matrix._column_keys
         aliases = [keys[logical] for logical in sorted(keys, key=matrix.horizontalHeader().visualIndex)]
         known = [project.alias.strip() for project in self.editor.projects() if project.alias.strip()]
         if len(known) == len(aliases) and set(known) == set(aliases) and known != aliases:
-            self.projects_order_requested.emit(aliases)
+            self._commit_order(False, aliases, self.projects_order_requested.emit)
 
     def _double_clicked(self, row, column):
         """합계 행을 두 번 눌러도 사람 입력 화면으로 이동하지 않는다."""
