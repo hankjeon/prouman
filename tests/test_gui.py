@@ -435,6 +435,84 @@ class GuiTests(unittest.TestCase):
                          view.visualRect(view.model().index(2, 0)).center())
         self.assertEqual(requested, before)  # 합계 행을 두 번 눌러도 이동하지 않는다.
 
+    def test_overview_row_drag_selection_follows_person(self):
+        w = self.generated([project(), project('사업2')],
+                           [person({'사업1': '0.6', '사업2': '0.4'}),
+                            person({'사업2': '1'}, name='김철수'), person(name='이영희')])
+        w.resize(1300, 800)
+        w.show()
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.OVERVIEW_TAB)
+        self.app.processEvents()
+        view = w.people_editor.overview.matrix
+        original = '\t'.join(view.item(0, c).text() for c in range(view.columnCount()))
+        for source, target in ((0, 2), (2, 0)):
+            self.drag_label_row(view, source, target)
+            self.assertEqual(view.item(target, 0).text(), '홍길동')
+            self.assertEqual(view.currentRow(), target)
+            self.assertEqual(view.currentColumn(), 0)
+            self.assertEqual({(i.row(), i.column()) for i in view.selectedIndexes()},
+                             {(target, c) for c in range(view.columnCount())})
+            self.assertEqual(view.copy_selection(), original)
+            w.people_editor.overview.refresh()
+            self.assertEqual(view.currentRow(), target)
+            self.assertEqual(view.copy_selection(), original)
+
+    def test_overview_column_drag_selection_follows_project(self):
+        w = self.generated([project(), project('사업2'), project('사업3')],
+                           [person({'사업1': '0.6', '사업2': '0.4'}),
+                            person({'사업3': '1'}, name='김철수')])
+        w.resize(1300, 800)
+        w.show()
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.OVERVIEW_TAB)
+        self.app.processEvents()
+        view = w.people_editor.overview.matrix
+        header = view.horizontalHeader()
+        original = '\n'.join(view.item(r, 1).text() for r in range(view.rowCount()))
+        for source, target in ((1, 3), (3, 1)):
+            start = view.visualRect(view.model().index(0, source)).center()
+            end_rect = view.visualRect(view.model().index(0, target))
+            end = end_rect.topRight() if target > source else end_rect.topLeft()
+            end.setX(end.x() - 3 if target > source else end.x() + 3)
+            start.setY(header.height() // 2)
+            end.setY(header.height() // 2)
+            QTest.mousePress(header.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+            QTest.mouseMove(header.viewport(), end, 25)
+            QTest.mouseRelease(header.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+            self.app.processEvents()
+            self.assertEqual(view.horizontalHeaderItem(target).text(), '사업1')
+            self.assertEqual(view.currentColumn(), target)
+            self.assertEqual({(i.row(), i.column()) for i in view.selectedIndexes()},
+                             {(r, target) for r in range(view.rowCount())})
+            self.assertEqual(view.copy_selection(), original)
+            w.people_editor.overview.refresh()
+            self.assertEqual(view.currentColumn(), target)
+            self.assertEqual(view.copy_selection(), original)
+
+    def test_overview_reorder_preserves_sparse_selection_and_fixed_cells(self):
+        w = self.generated([project(), project('사업2')],
+                           [person({'사업1': '0.6', '사업2': '0.4'}), person(name='김철수')])
+        overview = w.people_editor.overview
+        view = overview.matrix
+        view.clearSelection()
+        view.selectionModel().setCurrentIndex(view.model().index(1, 3), QItemSelectionModel.NoUpdate)
+        for row, column in ((0, 1), (1, 2), (2, 3)):
+            view.selectionModel().select(view.model().index(row, column), QItemSelectionModel.Select)
+        view.verticalHeader().moveSection(0, 1)
+        overview.commit_people_order(['김철수', '홍길동'])
+        view.horizontalHeader().moveSection(1, 2)
+        overview.commit_project_order()
+        self.assertEqual({(i.row(), i.column()) for i in view.selectedIndexes()}, {(1, 2), (0, 1), (2, 3)})
+        self.assertEqual((view.currentRow(), view.currentColumn()), (0, 3))
+        self.assertEqual(view.item(2, 0).text(), '사업별합계')
+        self.assertEqual(view.horizontalHeaderItem(3).text(), '할당합계')
+        view.clearSelection()
+        view.horizontalHeader().moveSection(1, 2)
+        overview.commit_project_order()
+        self.assertEqual(view.selectedIndexes(), [])
+        self.assertEqual((view.currentRow(), view.currentColumn()), (0, 3))
+
     def test_overview_order_survives_added_removed_people_and_projects(self):
         from allocation.document import PeopleDoc, PersonEntry
         from allocation.editor import PeopleEditor
