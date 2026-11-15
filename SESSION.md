@@ -6,7 +6,7 @@
 
 - 사용자 요청에 따라 기존 종합 드래그 선택 추적 수정 6개 파일을 검토했다. 게시 전 로컬 `main`과 GitHub `main`은 `67b7080`으로 같았고 수정은 로컬 미커밋 상태였다. `fix/overview-selection-tracking-20261115`의 `390f469`을 푸시하고 PR #8을 병합했다. 병합 커밋은 `97168ce`이며 로컬 main을 fast-forward했다.
 - 게시 전 Linux에서 `QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -q`: 193개 실행, 188개 통과·PowerShell 환경 없는 5개 건너뜀. `git diff --check` 통과. Windows 실마우스·PowerShell·배포 EXE는 이번에도 검증하지 않았으며 EXE를 빌드하지 않았다.
-- 다음은 실제 Windows GUI에서 선택 이동을 확인하는 것이다. .NET/Avalonia 전체 이전은 별도 계획으로, 이번 게시 범위에 포함하지 않는다.
+- 다음은 실제 Windows GUI에서 선택 이동을 확인하는 것이다.
 
 ## 2026-11-10 — 종합 드래그 후 선택·현재 셀 추적 수정
 
