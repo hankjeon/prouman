@@ -32,8 +32,16 @@ class TableOrderMixin:
         self._drag_origin = None
         self._drag_row = None
         self._row_dragging = False
+        self._pin_press_row = None
         self.verticalHeader().sectionMoved.connect(lambda logical, old, new: self._section_moved(True, logical, old, new))
         self.horizontalHeader().sectionMoved.connect(lambda logical, old, new: self._section_moved(False, logical, old, new))
+
+    def pin_hit(self, index, position):
+        """서브클래스가 0번 열의 압정 아이콘 히트 여부를 재정의한다."""
+        return False
+
+    def pin_clicked(self, row):
+        """서브클래스가 압정 클릭 처리를 재정의한다."""
 
     def configure_order(self, context=None, rows=None, columns=None):
         """rows/columns: 이동 가능한 논리 인덱스 → 안정적인 식별 이름."""
@@ -43,6 +51,7 @@ class TableOrderMixin:
         self._column_keys = dict(columns or {})
         self._drag_row = None
         self._row_dragging = False
+        self._pin_press_row = None
         self.viewport().unsetCursor()
         self.setMouseTracking(bool(self._row_keys))
         self.horizontalHeader().setSectionsMovable(bool(self._column_keys))
@@ -89,15 +98,25 @@ class TableOrderMixin:
     def mousePressEvent(self, event):
         self._drag_row = None
         self._row_dragging = False
+        self._pin_press_row = None
+        position = event.position().toPoint()
+        index = self.indexAt(position)
+        if (event.button() == Qt.LeftButton and event.modifiers() == Qt.NoModifier
+                and index.isValid() and self.pin_hit(index, position)):
+            self._pin_press_row = index.row()
+            event.accept()
+            return
         super().mousePressEvent(event)
-        index = self.indexAt(event.position().toPoint())
         if (event.button() == Qt.LeftButton and event.modifiers() == Qt.NoModifier
                 and index.isValid() and index.column() == 0 and index.row() in self._row_keys):
             self._drag_row = index.row()
-            self._drag_origin = event.position().toPoint()
+            self._drag_origin = position
 
     def mouseMoveEvent(self, event):
         position = event.position().toPoint()
+        if self._pin_press_row is not None and event.buttons() & Qt.LeftButton:
+            event.accept()
+            return
         if self._drag_row is not None and event.buttons() & Qt.LeftButton:
             if not self._row_dragging:
                 if (position - self._drag_origin).manhattanLength() < QApplication.startDragDistance():
@@ -126,13 +145,24 @@ class TableOrderMixin:
                 return
         if not event.buttons():
             index = self.indexAt(position)
-            if index.isValid() and index.column() == 0 and index.row() in self._row_keys:
+            if index.isValid() and self.pin_hit(index, position):
+                self.viewport().setCursor(Qt.PointingHandCursor)
+            elif index.isValid() and index.column() == 0 and index.row() in self._row_keys:
                 self.viewport().setCursor(Qt.OpenHandCursor)
             else:
                 self.viewport().unsetCursor()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        pin_row = self._pin_press_row
+        self._pin_press_row = None
+        if pin_row is not None and event.button() == Qt.LeftButton:
+            position = event.position().toPoint()
+            index = self.indexAt(position)
+            event.accept()
+            if index.isValid() and index.row() == pin_row and self.pin_hit(index, position):
+                self.pin_clicked(pin_row)
+            return
         dragging = self._row_dragging
         self._drag_row = None
         self._drag_origin = None

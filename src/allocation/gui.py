@@ -2,16 +2,17 @@
 import os
 import json
 import sys
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, Qt,
+from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, QSize, Qt, Signal,
                             qInstallMessageHandler)
-from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog,
                                QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton,
-                               QSplitter, QStackedWidget, QTableView, QTabWidget,
-                               QVBoxLayout, QWidget)
+                               QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+                               QTableView, QTabWidget, QToolTip, QVBoxLayout, QWidget)
 
 from . import theme
 from .document import (DocumentError, PeopleDoc, PlanDoc, detect_kind, dump_people, dump_plan, dump_projects,
@@ -84,11 +85,162 @@ class ResultTableModel(QAbstractTableModel):
         return None
 
 
+class PinTableDelegate(SelectionDelegate):
+    """결과 개인상세 0번 열 사업명 왼쪽에 압정 고정 아이콘을 그린다."""
+
+    def paint(self, painter, option, index):
+        view = self.parent()
+        provider = getattr(view, '_pin_provider', None)
+        state = provider(index.row())[0] if provider is not None and index.column() == 0 else 'none'
+        if state == 'none':
+            super().paint(painter, option, index)
+            return
+        opt_state = option.state
+        plain = QStyleOptionViewItem(option)
+        plain.state = opt_state & ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
+        self.selected = bool(opt_state & QStyle.StateFlag.State_Selected)
+        if self.selected:
+            painter.fillRect(option.rect, theme.selection_color())
+            plain.palette.setColor(QPalette.Text, theme.selected_text_color())
+        text_option = QStyleOptionViewItem(plain)
+        text_option.rect = option.rect.adjusted(theme.pin_text_offset(option.rect), 0, 0, 0)
+        QStyledItemDelegate.paint(self, painter, text_option, index)
+        self.selected = False
+        theme.draw_pin_icon(painter, theme.pin_icon_rect(option.rect), state,
+                            selected=bool(opt_state & QStyle.StateFlag.State_Selected))
+        if opt_state & QStyle.StateFlag.State_HasFocus:
+            painter.save()
+            painter.setPen(theme.current_cell_color())
+            painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+            painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        view = self.parent()
+        provider = getattr(view, '_pin_provider', None)
+        if provider is not None and index.column() == 0 and provider(index.row())[0] != 'none':
+            height = max(size.height(), option.fontMetrics.height() + 8)
+            return QSize(size.width() + theme.pin_icon_size(height) + 14, height)
+        return size
+
+
+class PinListDelegate(QStyledItemDelegate):
+    """결과 개인상세 사람 목록의 이름 왼쪽에 고정 상태 압정 아이콘을 그린다."""
+
+    def paint(self, painter, option, index):
+        view = self.parent()
+        name = index.data(Qt.DisplayRole) or ''
+        state = view.pin_state(name) if hasattr(view, 'pin_state') else 'none'
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        bg = QStyleOptionViewItem(option)
+        self.initStyleOption(bg, index)
+        bg.text = ''
+        style = bg.widget.style() if bg.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, bg, painter, bg.widget)
+        if state != 'none':
+            theme.draw_pin_icon(painter, theme.pin_icon_rect(option.rect), state, selected=selected)
+        text_rect = option.rect.adjusted(theme.pin_text_offset(option.rect), 0, -4, 0)
+        role = QPalette.HighlightedText if selected else QPalette.Text
+        painter.save()
+        painter.setFont(bg.font)
+        elided = bg.fontMetrics.elidedText(name, Qt.ElideRight, max(0, text_rect.width()))
+        style.drawItemText(painter, text_rect, int(Qt.AlignLeft | Qt.AlignVCenter), bg.palette,
+                           bool(bg.state & QStyle.StateFlag.State_Enabled), elided, role)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        height = max(size.height(), option.fontMetrics.height() + 8)
+        return QSize(size.width() + theme.pin_icon_size(height) + 14, height)
+
+
+class PinListWidget(QListWidget):
+    """사람 이름 앞에 고정/부분고정/미고정 압정 버튼을 표시하고 토글하는 목록."""
+
+    pin_toggled = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._pin_provider = None
+        self._pin_press_row = None
+        self.setMouseTracking(True)
+        self.setItemDelegate(PinListDelegate(self))
+
+    def set_pin_provider(self, provider):
+        self._pin_provider = provider
+        self.viewport().update()
+
+    def pin_info(self, name):
+        return self._pin_provider(name) if self._pin_provider is not None else ('none', '')
+
+    def pin_state(self, name):
+        return self.pin_info(name)[0]
+
+    def pin_hit(self, item, position):
+        if item is None or self._pin_provider is None:
+            return False
+        state, _ = self.pin_info(item.text())
+        return state != 'none' and theme.pin_hit_rect(self.visualItemRect(item)).contains(position)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.doItemsLayout()
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.ToolTip and self._pin_provider is not None:
+            item = self.itemAt(event.pos())
+            if item is not None:
+                _, tip = self.pin_info(item.text())
+                if tip:
+                    QToolTip.showText(event.globalPos(), tip, self)
+                    return True
+        return super().viewportEvent(event)
+
+    def mousePressEvent(self, event):
+        self._pin_press_row = None
+        position = event.position().toPoint()
+        item = self.itemAt(position)
+        if (event.button() == Qt.LeftButton and event.modifiers() == Qt.NoModifier
+                and self.pin_hit(item, position)):
+            self._pin_press_row = self.row(item)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        position = event.position().toPoint()
+        if self._pin_press_row is not None and event.buttons() & Qt.LeftButton:
+            event.accept()
+            return
+        if not event.buttons():
+            item = self.itemAt(position)
+            if self.pin_hit(item, position):
+                self.viewport().setCursor(Qt.PointingHandCursor)
+            else:
+                self.viewport().unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        pin_row = self._pin_press_row
+        self._pin_press_row = None
+        if pin_row is not None and event.button() == Qt.LeftButton:
+            position = event.position().toPoint()
+            item = self.itemAt(position)
+            event.accept()
+            if item is not None and self.row(item) == pin_row and self.pin_hit(item, position):
+                self.pin_toggled.emit(item.text())
+            return
+        super().mouseReleaseEvent(event)
+
+
 class CopyTableView(TableOrderMixin, QTableView):
     """선택한 셀 범위를 탭으로 구분한 텍스트로 복사한다. 선택하지 않은 칸은 비워 둔다."""
 
     def __init__(self):
         super().__init__()
+        self._pin_provider = None
+        self._on_pin_click = None
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setWordWrap(False)
@@ -98,8 +250,42 @@ class CopyTableView(TableOrderMixin, QTableView):
         self.setModel(ResultTableModel())
         self.init_table_order()
 
+    def set_pin_handler(self, provider, on_click):
+        self._pin_provider = provider
+        self._on_pin_click = on_click
+        self.setItemDelegate(PinTableDelegate(self) if provider is not None else SelectionDelegate(self))
+        self.setMouseTracking(True)
+
+    def pin_hit(self, index, position):
+        if self._pin_provider is None or index.column() != 0:
+            return False
+        state, _ = self._pin_provider(index.row())
+        return state != 'none' and theme.pin_hit_rect(self.visualRect(index)).contains(position)
+
+    def pin_clicked(self, row):
+        if self._on_pin_click is not None:
+            self._on_pin_click(row)
+
     def fit_rows(self):
         self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 8)
+
+    def resizeColumnsToContents(self):
+        super().resizeColumnsToContents()
+        if self._pin_provider is not None and self.model() is not None and self.model().columnCount() > 0:
+            # 0번 열이 매우 짧은 약칭이어도 압정 영역과 중앙 드래그 영역이 겹치지 않게 최소 너비를 둔다.
+            min_width = (theme.pin_icon_size(self.verticalHeader().defaultSectionSize()) + 8) * 2 + 16
+            if self.columnWidth(0) < min_width:
+                self.setColumnWidth(0, min_width)
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.ToolTip and self._pin_provider is not None:
+            index = self.indexAt(event.pos())
+            if index.isValid() and self.pin_hit(index, event.pos()):
+                _, tip = self._pin_provider(index.row())
+                if tip:
+                    QToolTip.showText(event.globalPos(), tip, self)
+                    return True
+        return super().viewportEvent(event)
 
     def changeEvent(self, event):
         # 글자 크기가 바뀌면 행 높이와 열 너비를 새 크기에 맞춘다.
@@ -152,6 +338,7 @@ class WorkspaceWindow(QMainWindow):
         self.planning = planning
         self.settings = settings if settings is not None else QSettings('prouman', 'prouman')
         self.result = None
+        self._shown_person = None
         self.issues = []
         self.generated_at = None  # 마지막 계산 시각. 결과 화면을 열 때마다 새로 계산한다.
         self.generated_from = ()  # 계산할 때의 사업·사람 파일 표시 이름
@@ -247,9 +434,12 @@ class WorkspaceWindow(QMainWindow):
             summary.addWidget(box)
         # 개인별 요약은 4열, 사업별 요약은 사업명이 있어 더 넓게 둔다.
         summary.setSizes([400, 800])
-        self.person_list = QListWidget()
+        self.person_list = PinListWidget()
+        self.person_list.set_pin_provider(self.person_pin_info)
+        self.person_list.pin_toggled.connect(self.toggle_person_pin)
         self.person_list.currentTextChanged.connect(self.show_person)
         self.person_view = CopyTableView()
+        self.person_view.set_pin_handler(self._person_view_pin_info, self._person_view_pin_clicked)
         people = QSplitter(Qt.Horizontal)
         people.addWidget(self.person_list)
         people.addWidget(self.person_view)
@@ -404,6 +594,7 @@ class WorkspaceWindow(QMainWindow):
                 model.colors = fresh
                 model.layoutChanged.emit()
             view.viewport().update()
+        self.person_list.viewport().update()
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -1056,11 +1247,12 @@ class WorkspaceWindow(QMainWindow):
         wanted = self.settings.value('current_year', '', type=str)
         self.select_year(wanted if wanted in self.people_docs else sorted(self.people_docs)[0])
 
-    def source_labels(self):
+    def source_labels(self, year=None):
         """계산에 쓴 파일 표시 이름. 합친 파일은 쉼표로 잇는다."""
+        target_year = self.current_year if year is None else year
         projects = ', '.join(sorted(Path(p).name for p in self.projects_sources)) or '(새 사업 입력)'
-        sources = self.people_sources.get(self.current_year, [])
-        people = ', '.join(sorted(Path(p).name for p in sources)) or f'(새 {self.current_year} 입력)'
+        sources = self.people_sources.get(target_year, [])
+        people = ', '.join(sorted(Path(p).name for p in sources)) or f'(새 {target_year} 입력)'
         return projects, people
 
     def closeEvent(self, event):
@@ -1072,11 +1264,202 @@ class WorkspaceWindow(QMainWindow):
     # --- 계산 결과 ---
 
     def clear_results(self):
+        self._shown_person = None
         for view in (self.people_summary_view, self.project_summary_view, self.person_view, self.project_people_view):
             view.show_table([], [])
         self.project_detail_label.clear()
         self.person_list.clear()
         self.project_list.clear()
+
+    def _result_person_entry(self, name):
+        """현재 계산 결과 연도의 사람 문서와 해당 PersonEntry를 돌려준다."""
+        if self.result is None or not name:
+            return None, None, None
+        year = str(self.result.inputs.year)
+        doc = self.people_docs.get(year)
+        if doc is None:
+            return None, None, None
+        entry = next((item for item in doc.people if item.name == name), None)
+        return (year, doc, entry) if entry is not None else (None, None, None)
+
+    def project_pin_info(self, name, alias):
+        """개인상세 사업 행의 압정 상태와 안내 문구: ('fixed' | 'unfixed' | 'none', tooltip)."""
+        _, _, entry = self._result_person_entry(name)
+        if entry is None or alias not in self.result.allocations.get(name, {}):
+            return 'none', ''
+        if alias in entry.fixed:
+            return 'fixed', f'{alias}: 월별 고정됨 (클릭하여 고정 해제)'
+        return 'unfixed', f'{alias}: 미고정 (클릭하여 현재 월별 값 고정)'
+
+    def person_pin_info(self, name):
+        """개인상세 사람 목록의 압정 상태와 안내 문구: ('fixed' | 'partial' | 'unfixed' | 'none', tooltip)."""
+        _, _, entry = self._result_person_entry(name)
+        projects = list(self.result.allocations.get(name, ())) if self.result is not None else []
+        if entry is None or not projects:
+            return 'none', ''
+        pinned = sum(1 for alias in projects if alias in entry.fixed)
+        total = len(projects)
+        if pinned == 0:
+            return 'unfixed', f'{name}: 미고정 (0/{total}개 사업 · 클릭하여 전체 고정)'
+        if pinned == total:
+            return 'fixed', f'{name}: 전체 고정됨 ({total}/{total}개 사업 · 클릭하여 전체 해제)'
+        return 'partial', f'{name}: 일부 고정됨 ({pinned}/{total}개 사업 · 클릭하여 전체 고정)'
+
+    def _person_view_project_alias(self, row):
+        model = self.person_view.model()
+        if (self.result is None or not self._shown_person or model is None
+                or not 0 <= row < model.rowCount() - 2):
+            return None
+        alias = model.rows[row][0]
+        return alias if alias in self.result.allocations.get(self._shown_person, {}) else None
+
+    def _person_view_pin_info(self, row):
+        alias = self._person_view_project_alias(row)
+        return self.project_pin_info(self._shown_person, alias) if alias is not None else ('none', '')
+
+    def _person_view_pin_clicked(self, row):
+        alias = self._person_view_project_alias(row)
+        if alias is not None:
+            self.toggle_project_pin(self._shown_person, alias)
+
+    def toggle_project_pin(self, name, alias):
+        """개별 사람·사업의 월별 고정 상태를 전환하고 단일 원본 파일에 실시간 저장한다."""
+        year, doc, entry = self._result_person_entry(name)
+        units = self.result.allocations.get(name, {}).get(alias) if self.result is not None else None
+        if entry is None or units is None:
+            return False
+        old_fixed = deepcopy(entry.fixed)
+        unpinning = alias in entry.fixed
+        if unpinning:
+            entry.fixed.pop(alias, None)
+            action = f'{name} · {alias} 월별 고정 해제'
+        else:
+            entry.fixed[alias] = [amount(u) for u in units]
+            action = f'{name} · {alias} 월별 고정'
+        return self._finish_pin_change(year, doc, entry, old_fixed, action, recalculate=unpinning)
+
+    def toggle_person_pin(self, name):
+        """사람의 전체 사업 월별 고정 상태를 전환한다. 일부 고정 상태는 전체 고정으로 전환한다."""
+        year, doc, entry = self._result_person_entry(name)
+        allocs = self.result.allocations.get(name, {}) if self.result is not None else {}
+        if entry is None or not allocs:
+            return False
+        old_fixed = deepcopy(entry.fixed)
+        state, _ = self.person_pin_info(name)
+        if state == 'fixed':
+            for alias in allocs:
+                entry.fixed.pop(alias, None)
+            unpinning = True
+            action = f'{name} 전체 사업 월별 고정 해제'
+        else:
+            for alias, units in allocs.items():
+                if alias not in entry.fixed:
+                    entry.fixed[alias] = [amount(u) for u in units]
+            unpinning = False
+            action = f'{name} 전체 사업 월별 고정'
+        return self._finish_pin_change(year, doc, entry, old_fixed, action, recalculate=unpinning)
+
+    def _finish_pin_change(self, year, doc, entry, old_fixed, action, recalculate=False):
+        sources = self.people_sources.get(year, [])
+        if len(sources) == 1:
+            target = sources[0]
+            if not self.write_yaml_jobs([(target, dump_people(doc), 'people:' + year)],
+                                        encoding='preserve', interactive=True):
+                entry.fixed = old_fixed
+                return False
+            self.set_people_dirty(year, False)
+            save_note = f' ({Path(target).name} 저장됨)'
+        else:
+            self.set_people_dirty(year, True)
+            save_note = ' (저장된 단일 사람 파일이 없어 메모리에만 반영했습니다. 파일 → 저장으로 저장하세요.)'
+
+        # 입력 탭의 월별 고정 표와 사람 목록 상태를 즉시 맞춘다.
+        if year == self.current_year and self.people_editor.doc is doc:
+            try:
+                index = doc.people.index(entry)
+            except ValueError:
+                index = -1
+            if index >= 0:
+                self.people_editor.mark_person(index)
+            if self.people_editor.current() is entry:
+                self.people_editor.show_person()
+
+        if recalculate:
+            self._refresh_result_in_place(year)
+        else:
+            self.person_list.viewport().update()
+            self.person_view.viewport().update()
+        self.statusBar().showMessage(action + save_note)
+        return True
+
+    def _refresh_result_in_place(self, year):
+        """현재 결과 탭·선택된 사람/사업·표시 순서를 유지한 채 해당 연도 결과를 다시 계산한다."""
+        doc = self.people_docs.get(year)
+        if doc is None:
+            return
+        current_tab = self.result_tabs.currentIndex()
+        shown_person = self._shown_person
+        selected_person = self.person_list.currentItem().text() if self.person_list.currentItem() else None
+        selected_project = self.project_list.currentItem().text() if self.project_list.currentItem() else None
+        labels = self.source_labels(year)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            inputs, issues = load_inputs(
+                *labels, texts={'projects': dump_projects(self.project_editor.projects),
+                                'people': dump_people(doc)})
+            result = calculate(inputs, issues) if inputs is not None else None
+        except Exception as exc:
+            self.warn('계산 실패', f'{type(exc).__name__}: {exc}')
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.issues = result.issues if result is not None else issues
+        self.generated_at, self.generated_from = datetime.now(), labels
+        self.issue_view.show_table(*issue_table(self.issues), colors=severity_colors())
+        if result is None or result.has_errors:
+            self.result = None
+            self.excel_button.setEnabled(False)
+            self.clear_results()
+            self.show_result_header(' · 오류로 결과를 만들지 않았습니다. 입력 화면에서 고친 뒤 결과 화면으로 돌아오세요.')
+            self.result_tabs.setCurrentIndex(self.ISSUES_TAB)
+            return
+
+        self.result = result
+        self.show_result_header()
+        self.people_summary_view.show_table(*people_summary_table(result))
+        self.project_summary_view.show_table(*project_summary_table(result))
+        project_names = list(result.inputs.projects)
+        if [self.project_list.item(i).text() for i in range(self.project_list.count())] != project_names:
+            self.project_list.blockSignals(True)
+            self.project_list.clear()
+            self.project_list.addItems(project_names)
+            if selected_project in project_names:
+                self.project_list.setCurrentRow(project_names.index(selected_project))
+            elif project_names:
+                self.project_list.setCurrentRow(0)
+            self.project_list.blockSignals(False)
+        active_project = (selected_project if selected_project in result.inputs.projects
+                          else (project_names[0] if project_names else ''))
+        self.show_project_people(active_project)
+
+        person_names = list(result.inputs.people)
+        if [self.person_list.item(i).text() for i in range(self.person_list.count())] != person_names:
+            self.person_list.blockSignals(True)
+            self.person_list.clear()
+            self.person_list.addItems(person_names)
+            if selected_person in person_names:
+                self.person_list.setCurrentRow(person_names.index(selected_person))
+            elif person_names:
+                self.person_list.setCurrentRow(0)
+            self.person_list.blockSignals(False)
+        active_person = (shown_person if shown_person in result.inputs.people
+                         else (selected_person if selected_person in result.inputs.people
+                               else (person_names[0] if person_names else '')))
+        self.show_person(active_person)
+        self.person_list.viewport().update()
+        self.excel_button.setEnabled(True)
+        self.result_tabs.setCurrentIndex(current_tab)
 
     def generate(self):
         """입력 화면의 현재 내용(내보내기 전이어도)을 파일과 같은 규칙으로 검증·계산해 결과 화면에 보여 준다."""
@@ -1139,9 +1522,11 @@ class WorkspaceWindow(QMainWindow):
 
     def show_person(self, name):
         if self.result is not None and name in self.result.inputs.people:
+            self._shown_person = name
             self.person_view.show_table(*person_detail_table(self.result, name), bold_label='합계',
                                         order_context=('person', name), footer_rows=2)
         else:
+            self._shown_person = None
             self.person_view.show_table([], [])
 
     def browse_excel(self):

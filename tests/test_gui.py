@@ -288,6 +288,201 @@ class GuiTests(unittest.TestCase):
         self.assertIsNotNone(w.result)
         self.assertFalse(w.result.has_errors)
 
+    def click_table_pin(self, view, logical_row):
+        rect = view.visualRect(view.model().index(logical_row, 0))
+        point = theme.pin_hit_rect(rect).center()
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.app.processEvents()
+
+    def click_list_pin(self, widget, row):
+        rect = widget.visualItemRect(widget.item(row))
+        point = theme.pin_hit_rect(rect).center()
+        QTest.mouseClick(widget.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.app.processEvents()
+
+    def test_result_person_detail_pin_project_and_person_realtime_save(self):
+        from allocation.models import amount
+        self.capture_slot_errors()
+        p, h = self.write(
+            [project(), project('사업2')],
+            [person({'사업1': '0.6', '사업2': '0.4'}),
+             person({'사업2': '1'}, name='김철수'),
+             person({}, absences=['2027-01-01~2027-12-31'], name='전공백')],
+        )
+        original_bytes = h.read_bytes()
+        w = self.window()
+        w.resize(1300, 800)
+        w.show()
+        errors, _ = w.import_files([str(p), str(h)])
+        self.assertEqual(errors, [])
+        w.generate()
+        w.result_tabs.setCurrentIndex(2)
+        self.app.processEvents()
+
+        self.assertEqual(w.person_pin_info('홍길동')[0], 'unfixed')
+        self.assertEqual(w.person_pin_info('김철수')[0], 'unfixed')
+        self.assertEqual(w.person_pin_info('전공백')[0], 'none')
+        self.assertEqual(w.project_pin_info('홍길동', '사업1')[0], 'unfixed')
+
+        # 1) 개인상세 표에서 홍길동·사업1 압정 클릭 → 사업1만 고정, 사람 목록은 partial, 파일 실시간 저장.
+        expected_p1 = [amount(u) for u in w.result.allocations['홍길동']['사업1']]
+        expected_p2 = [amount(u) for u in w.result.allocations['홍길동']['사업2']]
+        self.click_table_pin(w.person_view, 0)
+        self.assertEqual(w.project_pin_info('홍길동', '사업1')[0], 'fixed')
+        self.assertEqual(w.project_pin_info('홍길동', '사업2')[0], 'unfixed')
+        self.assertEqual(w.person_pin_info('홍길동')[0], 'partial')
+        self.assertFalse(w.people_dirty['2027'])
+        self.assertEqual(h.with_name(h.name + '.bak').read_bytes(), original_bytes)
+        saved = yaml.safe_load(h.read_text(encoding='utf-8'))
+        hong_saved = next(item for item in saved['people'] if item['name'] == '홍길동')
+        self.assertEqual(hong_saved['fixed'], {'사업1': expected_p1})
+        # 입력 탭 월별 고정 표도 즉시 동기화된다.
+        self.assertEqual(w.people_editor.fixed.rowCount(), 1)
+        self.assertEqual(w.people_editor.fixed.item(0, 0).text(), '사업1')
+
+        # 2) 사람 목록에서 partial 상태의 홍길동 압정 클릭 → 전체 사업 고정.
+        self.click_list_pin(w.person_list, 0)
+        self.assertEqual(w.person_pin_info('홍길동')[0], 'fixed')
+        self.assertEqual(w.project_pin_info('홍길동', '사업2')[0], 'fixed')
+        saved = yaml.safe_load(h.read_text(encoding='utf-8'))
+        hong_saved = next(item for item in saved['people'] if item['name'] == '홍길동')
+        self.assertEqual(hong_saved['fixed'], {'사업1': expected_p1, '사업2': expected_p2})
+
+        # 3) 사람 목록에서 선택되지 않은 김철수 압정 클릭 → 현재 선택(홍길동)을 유지하면서 김철수 전체 고정.
+        self.click_list_pin(w.person_list, 1)
+        self.assertEqual(w.person_list.currentRow(), 0)
+        self.assertEqual(w.person_pin_info('김철수')[0], 'fixed')
+        saved = yaml.safe_load(h.read_text(encoding='utf-8'))
+        kim_saved = next(item for item in saved['people'] if item['name'] == '김철수')
+        self.assertEqual(kim_saved['fixed']['사업2'], [amount(u) for u in w.result.allocations['김철수']['사업2']])
+
+        # 4) 사람 목록에서 전체 고정 상태의 홍길동 압정 다시 클릭 → 전체 해제 및 실시간 저장, 탭·선택 유지.
+        self.click_list_pin(w.person_list, 0)
+        self.assertEqual(w.person_pin_info('홍길동')[0], 'unfixed')
+        self.assertEqual(w.result_tabs.currentIndex(), 2)
+        self.assertEqual(w.person_list.currentRow(), 0)
+        saved = yaml.safe_load(h.read_text(encoding='utf-8'))
+        hong_saved = next(item for item in saved['people'] if item['name'] == '홍길동')
+        self.assertNotIn('fixed', hong_saved)
+
+        # 5) 푸터 행(공백·합계) 및 참여 사업 없는 사람(전공백) 압정 클릭은 무시된다.
+        self.click_table_pin(w.person_view, 2)
+        self.click_table_pin(w.person_view, 3)
+        self.click_list_pin(w.person_list, 2)
+        self.assertEqual(w.people_docs['2027'].people[0].fixed, {})
+        self.assertEqual(w.people_docs['2027'].people[2].fixed, {})
+
+        # 6) 재시작 후 다시 열어도 저장된 김철수의 고정 상태가 그대로 유지된다.
+        reopened = self.window()
+        reopened.generate()
+        self.assertEqual(reopened.person_pin_info('김철수')[0], 'fixed')
+        self.assertEqual(reopened.person_pin_info('홍길동')[0], 'unfixed')
+
+    def test_result_pin_unpin_recalculates_in_place_and_preserves_drag_and_copy(self):
+        self.capture_slot_errors()
+        p, h = self.write([project(), project('사업2')], [self.fixed_input()])
+        w = self.window()
+        w.resize(1300, 800)
+        w.show()
+        errors, _ = w.import_files([str(p), str(h)])
+        self.assertEqual(errors, [])
+        w.generate()
+        w.result_tabs.setCurrentIndex(2)
+        self.app.processEvents()
+
+        view = w.person_view
+        self.assertEqual(w.person_pin_info('홍길동')[0], 'partial')
+        self.assertEqual(w.project_pin_info('홍길동', '사업2')[0], 'fixed')
+        # 초기 사업2 12월 값은 수동 고정값 0.00000이다.
+        self.assertEqual(view.model().text(1, 12), '0.00000')
+
+        # 사업2 행을 맨 위로 드래그 이동한 뒤에도 복사 텍스트는 압정 없이 기존과 같다.
+        original = self.texts(view)
+        self.drag_label_row(view, 1, 0)
+        self.assertEqual([view.verticalHeader().logicalIndex(i) for i in range(4)], [1, 0, 2, 3])
+        view.selectAll()
+        self.assertEqual(view.copy_selection(), '\n'.join('\t'.join(original[i]) for i in (1, 0, 2, 3)))
+
+        # 압정 위에서 누른 뒤 살짝 움직여도 드래그가 시작되지 않고, 논리 행 1(사업2)의 고정이 해제된다.
+        from PySide6.QtCore import QPoint
+        pin_pos = theme.pin_hit_rect(view.visualRect(view.model().index(1, 0))).center()
+        QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, pin_pos)
+        QTest.mouseMove(view.viewport(), pin_pos + QPoint(2, 2), 10)
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, pin_pos)
+        self.app.processEvents()
+
+        # 해제 직후 개인상세 탭·드래그 순서가 유지된 채 최신 균등 알고리즘 값으로 즉시 재계산된다.
+        self.assertEqual(w.result_tabs.currentIndex(), 2)
+        self.assertEqual(w.person_pin_info('홍길동')[0], 'unfixed')
+        self.assertEqual([view.verticalHeader().logicalIndex(i) for i in range(4)], [1, 0, 2, 3])
+        self.assertIn(view.model().text(1, 12), ('0.04166', '0.04167'))
+        saved = yaml.safe_load(h.read_text(encoding='utf-8'))
+        self.assertNotIn('fixed', saved['people'][0])
+
+    def test_result_pin_rollback_dirty_and_encoding_edge_cases(self):
+        from unittest.mock import patch
+        self.capture_slot_errors()
+        # 1) CP949 원본 파일에서 고정 시 CP949 인코딩이 유지되고, 미저장 사람 변경도 함께 저장된다.
+        p, h = self.write([project(), project('사업2')], [person({'사업1': '0.6', '사업2': '0.4'})])
+        h.write_bytes(h.read_text(encoding='utf-8').encode('cp949'))
+        w = self.window()
+        errors, _ = w.import_files([str(p), str(h)])
+        self.assertEqual(errors, [])
+        w.people_editor.allocations.item(0, 1).setText('0.5')
+        w.people_editor.allocations.item(1, 1).setText('0.5')
+        w.set_projects_dirty(True)
+        self.assertTrue(w.people_dirty['2027'])
+        w.generate()
+        self.assertTrue(w.toggle_project_pin('홍길동', '사업1'))
+        self.assertFalse(w.people_dirty['2027'])
+        self.assertTrue(w.projects_dirty)  # 사업 파일 dirty는 건드리지 않는다.
+        self.assertEqual(w.file_encodings[str(h.resolve())][0], 'cp949')
+        raw = h.read_bytes()
+        with self.assertRaises(UnicodeDecodeError):
+            raw.decode('utf-8')
+        decoded = yaml.safe_load(raw.decode('cp949'))
+        self.assertEqual(decoded['people'][0]['allocations']['사업1'], '0.5')
+        self.assertIn('사업1', decoded['people'][0]['fixed'])
+
+        # 2) 실시간 저장 실패 시 메모리 fixed가 원래 상태로 롤백된다.
+        before = dict(w.people_docs['2027'].people[0].fixed)
+        with patch.object(w, 'write_yaml_jobs', return_value=False):
+            self.assertFalse(w.toggle_project_pin('홍길동', '사업1'))
+        self.assertEqual(w.people_docs['2027'].people[0].fixed, before)
+        self.assertEqual(w.project_pin_info('홍길동', '사업1')[0], 'fixed')
+
+        # 3) 단일 원본 파일이 없는 새 문서에서는 메모리에만 반영하고 dirty=True 및 안내를 표시한다.
+        fresh = WorkspaceWindow(QSettings(str(self.path / 'fresh_pin.ini'), QSettings.IniFormat))
+        fresh.warn = lambda title, text: self.warnings.append((title, text))
+        self.addCleanup(fresh.deleteLater)
+        year = fresh.current_year
+        fresh.project_editor.set_projects([ProjectEntry('사업1', '사업1', f'{year}-01-01', f'{year}-12-31',
+                                                        [YearEntry(year, '1.0')])])
+        fresh.people_editor.add_person()
+        fresh.people_editor.doc.people[0].allocations = {'사업1': '1.0'}
+        fresh.set_people_dirty(year, False)
+        fresh.generate()
+        self.assertTrue(fresh.toggle_project_pin('새 사람', '사업1'))
+        self.assertIn('사업1', fresh.people_docs[year].people[0].fixed)
+        self.assertTrue(fresh.people_dirty[year])
+        self.assertIn('메모리에만 반영', fresh.statusBar().currentMessage())
+
+        # 4) 같은 연도 사람 파일 2개를 합쳐 불러온 경우에도 임의 파일에 덮어쓰지 않고 메모리에만 반영한다.
+        h2 = self.path / 'people' / 'people_extra.yaml'
+        h2.write_text(yaml.safe_dump({'year': 2027, 'people': [person({'사업2': '1'}, name='이영희')]},
+                                     allow_unicode=True, sort_keys=False), encoding='utf-8')
+        before_h, before_h2 = h.read_bytes(), h2.read_bytes()
+        errors, _ = w.import_files([str(h2)])
+        self.assertEqual(errors, [])
+        w.set_people_dirty('2027', False)
+        w.generate()
+        self.assertTrue(w.toggle_person_pin('이영희'))
+        self.assertIn('사업2', w.people_docs['2027'].people[1].fixed)
+        self.assertTrue(w.people_dirty['2027'])
+        self.assertEqual(h.read_bytes(), before_h)
+        self.assertEqual(h2.read_bytes(), before_h2)
+        self.assertIn('메모리에만 반영', w.statusBar().currentMessage())
+
     @staticmethod
     def texts(view):
         model = view.model()
@@ -1638,9 +1833,26 @@ class ThemeTests(unittest.TestCase):
         # 라이트/다크 짝이 다르면 테마에 따라 다른 색이 나온다.
         for func in (theme.current_row_color, theme.current_cell_color, theme.problem_color,
                      theme.computed_color, theme.excluded_color, theme.outside_color,
-                     theme.error_text, theme.warning_text):
+                     theme.error_text, theme.warning_text,
+                     theme.pin_fixed_color, theme.pin_partial_color, theme.pin_unfixed_color):
             with self.subTest(func=func.__name__):
                 self.assertNotEqual(self.themed(False, func).name(), self.themed(True, func).name())
+
+    def test_pin_icon_renders_all_states_in_light_and_dark(self):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QImage, QPainter
+        for dark in (False, True):
+            for state in ('fixed', 'partial', 'unfixed'):
+                for selected in (False, True):
+                    image = QImage(24, 24, QImage.Format_ARGB32)
+                    image.fill(0)
+                    painter = QPainter(image)
+                    try:
+                        self.themed(dark, theme.draw_pin_icon, painter, QRect(4, 4, 16, 16), state, selected)
+                    finally:
+                        painter.end()
+                    # 아이콘 픽셀이 실제로 그려졌는지 확인한다.
+                    self.assertTrue(any(image.pixel(x, y) != 0 for x in range(24) for y in range(24)))
 
     def test_T29_selection_follows_system_highlight(self):
         # 선택 배경은 시스템 강조색이라 어떤 테마에서도 어울리고,
