@@ -2,12 +2,12 @@
 from bisect import bisect_left
 from datetime import date
 
-from PySide6.QtCore import QDate, QEvent, QItemSelection, QItemSelectionModel, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QItemSelection, QItemSelectionModel, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
-                               QStyleFactory, QToolButton, QVBoxLayout, QWidget)
+                               QStyleFactory, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
 from . import theme
 from .document import (QUANTITY_HINT, AbsenceEntry, PeopleDoc, PersonEntry, ProjectEntry, YearEntry,
@@ -18,6 +18,7 @@ from .table_order import TableOrderMixin, selection_text
 
 TRANSPARENT = QColor(0, 0, 0, 0)
 BASE_ROLE, NOTE_ROLE = Qt.UserRole + 1, Qt.UserRole + 2  # 칸의 기본 배경색과 안내(오류가 없을 때 보임)
+PERSON_ROLE = Qt.UserRole + 3  # 사람 목록 항목에 연결된 PersonEntry 참조
 
 
 class SelectionDelegate(QStyledItemDelegate):
@@ -171,8 +172,42 @@ class EditTable(TableOrderMixin, QTableWidget):
                     item.setText(value.strip())
 
 
+class PinListDelegate(QStyledItemDelegate):
+    """사람 목록의 이름 왼쪽에 고정 상태 압정 아이콘을 그린다."""
+
+    def paint(self, painter, option, index):
+        view = self.parent()
+        name = index.data(Qt.DisplayRole) or ''
+        state = view.pin_state(index) if hasattr(view, 'pin_state') else 'none'
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        bg = QStyleOptionViewItem(option)
+        self.initStyleOption(bg, index)
+        bg.text = ''
+        style = bg.widget.style() if bg.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, bg, painter, bg.widget)
+        if state != 'none':
+            theme.draw_pin_icon(painter, theme.pin_icon_rect(option.rect), state, selected=selected)
+        text_rect = option.rect.adjusted(theme.pin_text_offset(option.rect), 0, -4, 0)
+        role = QPalette.HighlightedText if selected else QPalette.Text
+        painter.save()
+        painter.setFont(bg.font)
+        elided = bg.fontMetrics.elidedText(name, Qt.ElideRight, max(0, text_rect.width()))
+        style.drawItemText(painter, text_rect, int(Qt.AlignLeft | Qt.AlignVCenter), bg.palette,
+                           bool(bg.state & QStyle.StateFlag.State_Enabled), elided, role)
+        painter.restore()
+
+    def updateEditorGeometry(self, editor, option, index):
+        # 인라인 이름 편집 상자도 압정 오른쪽 텍스트 영역에 맞춰 배치한다.
+        editor.setGeometry(option.rect.adjusted(theme.pin_text_offset(option.rect), 0, 0, 0))
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        height = max(size.height(), option.fontMetrics.height() + 8)
+        return QSize(size.width() + theme.pin_icon_size(height) + 14, height)
+
+
 class OrderedPeopleList(QListWidget):
-    """이름 항목 하나를 잡아 목록 안에서 순서를 옮긴다."""
+    """이름 항목 하나를 잡아 목록 안에서 순서를 옮긴다. 압정 아이콘은 상태 표시 전용이다."""
 
     order_changed = Signal()
 
@@ -182,6 +217,46 @@ class OrderedPeopleList(QListWidget):
         self._drag_item = None
         self._drag_start = None
         self._moved = False
+        self._pin_provider = None
+        self.setItemDelegate(PinListDelegate(self))
+
+    def set_pin_provider(self, provider):
+        self._pin_provider = provider
+        self.viewport().update()
+
+    def pin_info(self, target):
+        if self._pin_provider is None:
+            return 'none', ''
+        if hasattr(target, 'data'):
+            person = target.data(PERSON_ROLE)
+            return self._pin_provider(person if person is not None else target.row())
+        if isinstance(target, QListWidgetItem):
+            person = target.data(PERSON_ROLE)
+            return self._pin_provider(person if person is not None else self.row(target))
+        if isinstance(target, int) and 0 <= target < self.count():
+            item = self.item(target)
+            person = item.data(PERSON_ROLE) if item is not None else None
+            return self._pin_provider(person if person is not None else target)
+        return self._pin_provider(target)
+
+    def pin_state(self, target):
+        return self.pin_info(target)[0]
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self.doItemsLayout()
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.ToolTip and self._pin_provider is not None:
+            item = self.itemAt(event.pos())
+            if item is not None:
+                _, pin_tip = self.pin_info(item)
+                parts = [text for text in (item.toolTip(), pin_tip) if text]
+                if parts:
+                    QToolTip.showText(event.globalPos(), '\n'.join(parts), self)
+                    return True
+        return super().viewportEvent(event)
 
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
@@ -732,6 +807,7 @@ class PeopleEditor(QWidget):
         self.year_edit.textEdited.connect(self.year_edited)
 
         self.people_list = OrderedPeopleList()
+        self.people_list.set_pin_provider(self.person_pin_info)
         self.people_list.order_changed.connect(self.people_rows_moved)
         self.people_list.currentRowChanged.connect(lambda row: self.show_person())
         self.people_list.itemChanged.connect(self.name_edited)
@@ -839,6 +915,7 @@ class PeopleEditor(QWidget):
         for person in self.doc.people:
             item = QListWidgetItem(person.name)
             item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setData(PERSON_ROLE, person)
             self.people_list.addItem(item)
         self.people_list.blockSignals(False)
         for index in range(len(self.doc.people)):
@@ -876,6 +953,33 @@ class PeopleEditor(QWidget):
             return f'사업 합계 + 공백이 1.00000이어야 합니다 (현재 {amount(targets + absence)}).'
         return ''
 
+    def person_pin_info(self, target):
+        """사람 목록의 읽기 전용 압정 상태와 안내 문구: ('fixed' | 'partial' | 'unfixed' | 'none', tooltip)."""
+        if isinstance(target, int):
+            person = self.doc.people[target] if 0 <= target < len(self.doc.people) else None
+        elif isinstance(target, str):
+            person = next((item for item in self.doc.people if item.name == target), None)
+        else:
+            person = target
+        if not isinstance(person, PersonEntry):
+            return 'none', ''
+        projects = [alias for alias, value in person.allocations.items() if alias.strip() and value.strip()]
+        fixed_aliases = [alias for alias in person.fixed if alias.strip()]
+        if not projects:
+            if fixed_aliases:
+                return 'partial', f'{person.name}: 월별 고정 항목 {len(fixed_aliases)}개 (참여 사업 확인 필요 · 상태 표시)'
+            return 'none', ''
+        pinned = sum(1 for alias in projects if alias in person.fixed)
+        extra = sum(1 for alias in fixed_aliases if alias not in projects)
+        total = len(projects)
+        if pinned == 0 and extra == 0:
+            return 'unfixed', f'{person.name}: 미고정 (0/{total}개 사업 · 상태 표시)'
+        if pinned == total and extra == 0:
+            return 'fixed', f'{person.name}: 전체 고정됨 ({total}/{total}개 사업 · 상태 표시)'
+        if pinned == total and extra > 0:
+            return 'fixed', f'{person.name}: 전체 고정됨 ({total}/{total}개 사업 · 추가 고정 {extra}개 · 상태 표시)'
+        return 'partial', f'{person.name}: 일부 고정됨 ({pinned}/{total}개 사업 · 상태 표시)'
+
     def mark_person(self, index):
         """합계가 맞지 않거나 이름에 문제가 있는 사람은 목록에서 붉게 표시한다."""
         person, item = self.doc.people[index], self.people_list.item(index)
@@ -890,6 +994,7 @@ class PeopleEditor(QWidget):
             item.setForeground(QBrush())
         item.setToolTip(problem)
         self.people_list.blockSignals(False)
+        self.people_list.viewport().update()
 
     def unique_name(self):
         names = {p.name for p in self.doc.people}

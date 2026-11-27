@@ -2,6 +2,16 @@
 
 이 문서는 세션별 결정·실제 작업·검증·다음 할 일을 이어서 기록한다. 최신 세션을 위에 둔다. 기존 기능별 이력은 `docs/development-log.md`에 남아 있으며 이 문서로 소급해 옮기지 않는다. `완료`는 실제 수행·확인한 작업에만 사용한다.
 
+## 2026-11-28 — 실적 입력 사람 목록 읽기 전용 압정 상태 표시 구현
+
+- 사용자 요청: 실적작업 → 입력 → 사람 입력 화면의 왼쪽 사람 목록 앞에 결과 개인상세와 같은 압정 아이콘으로 월별 고정(`fixed`) 상태를 표시하되, 클릭으로 고정/해제를 전환하지 않고 상태 표시 전용으로 동작하게 한다.
+- `src/allocation/editor.py`로 `PinListDelegate`를 이동해 결과 화면(`gui.py`의 `PinListWidget`)과 동일한 벡터 압정 렌더링·여백·행 높이를 공용으로 재사용하고, 인라인 이름 편집기(`updateEditorGeometry`)도 압정 오른쪽 텍스트 영역에 맞췄다.
+- `OrderedPeopleList`에 읽기 전용 압정 표시(`set_pin_provider`, `pin_info`, `pin_state`, `FontChange` 레이아웃 갱신, `viewportEvent` 툴팁 결합)를 추가하고, 마우스 클릭·드래그·커서 처리는 그대로 두어 압정 클릭이 고정/해제를 바꾸지 않고 기존 항목 선택·더블클릭 이름 편집·드래그 순서 변경만 수행하게 했다. 각 `QListWidgetItem`에 `PERSON_ROLE`로 `PersonEntry` 참조를 연결해 중복 이름이나 드래그 이동 중에도 사람별 압정 상태가 정확히 따라가게 했다.
+- `PeopleEditor.person_pin_info`는 `allocations`와 `fixed`를 기준으로 `fixed`(전체 고정)·`partial`(일부 고정 또는 참여율 누락 고정)·`unfixed`(미고정)·`none`(참여 사업과 고정 모두 없음) 상태를 계산한다. `mark_person`이 뷰포트를 갱신하므로 입력 화면의 고정 추가/해제·참여율 수정과 결과 화면 압정 토글이 즉시 동기화되며, `item.toolTip()`의 오류 문구와 붉은 글씨(`error_text`) 계약도 그대로 유지한다. `README.md`, `docs/requirements.md`, `docs/test-cases.md`를 함께 갱신했다.
+- `tests/test_gui.py`에 `test_people_input_list_pin_status_readonly_sync_and_drag`를 추가해 4상태(`fixed`/`partial`/`unfixed`/`none`), 압정 클릭 읽기 전용(fixed·dirty 불변, 선택 유지), 입력 화면 고정 추가/해제·참여율 빈값 고정, 압정 위 드래그 순서 변경 추적, 결과 화면 압정 토글 동기화, 실제 offscreen 픽셀 렌더링과 오류 항목 붉은 글씨 유지를 검증했다.
+- 검증: `QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -q` 실행 → 198개 실행, 193개 통과·PowerShell 환경 없는 5개 건너뜀(약 19.3초). `git diff --check` 통과.
+- 검증하지 못한 경계: 실제 Windows GUI 마우스 클릭·드래그·인라인 이름 편집 및 툴팁 표시, PowerShell 스크립트, 배포용 Windows EXE(명시적 빌드 요청 없어 갱신하지 않음). 다음은 실제 GUI에서 실적 입력 사람 목록의 압정 상태 표시와 읽기 전용 동작을 확인하는 것이다.
+
 ## 2026-11-27 — 실적 결과 개인상세 압정 월별 고정 및 실시간 저장 구현
 
 - 사용자와 합의: 실적작업 결과 → 개인상세 화면에서 사업 행 앞 압정 버튼으로 개별 사업 월별 고정(`fixed`)·해제를 수행하고, 사람 목록 이름 앞 압정 버튼으로 미고정·부분 고정·전체 고정 3상태 표시 및 일괄 고정/해제를 제공한다. 권장안 4가지를 확정했다: (1) 부분 고정 사람 클릭 시 전체 고정으로 전환 후 재클릭 시 전체 해제, (2) 고정 해제 시 개인상세 탭·선택·표시 순서를 유지한 채 조용히 즉시 재계산, (3) 단일 원본 사람 파일이 없는 새 문서·다중 파일 병합 문서는 메모리에만 반영하고 미저장(`*`)·상태바 안내 유지, (4) 입력에 미저장 사람 변경이 있어도 현재 결과가 그 입력 기준이므로 단일 파일 실시간 저장 시 해당 연도 사람 파일 전체를 저장(`people_dirty` 해제, `projects_dirty` 유지).
