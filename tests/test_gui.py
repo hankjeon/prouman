@@ -483,6 +483,107 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(h2.read_bytes(), before_h2)
         self.assertIn('메모리에만 반영', w.statusBar().currentMessage())
 
+    def test_people_input_list_pin_status_readonly_sync_and_drag(self):
+        from PySide6.QtCore import QPoint
+        from test_fixed_allocations import HALF_YEAR
+        self.capture_slot_errors()
+        full_fixed = person({'사업1': '0.50000', '사업2': '0.50000'}, name='전체고정')
+        second_half = list(HALF_YEAR[6:]) + list(HALF_YEAR[:6])
+        full_fixed['fixed'] = {'사업1': list(HALF_YEAR), '사업2': second_half}
+        partial_fixed = self.fixed_input()  # 홍길동: 사업2만 고정
+        unfixed_person = person({'사업1': '1.00000'}, name='미고정')
+        absent_person = person({}, absences=['2027-01-01~2027-12-31'], name='전공백')
+        p, h = self.write(
+            [project(), project('사업2')],
+            [full_fixed, partial_fixed, unfixed_person, absent_person],
+        )
+        w = self.window()
+        w.resize(1300, 800)
+        w.show()
+        errors, _ = w.import_files([str(p), str(h)])
+        self.assertEqual(errors, [])
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.PEOPLE_TAB)
+        self.app.processEvents()
+
+        editor = w.people_editor
+        plist = editor.people_list
+        self.assertEqual([plist.pin_state(i) for i in range(4)], ['fixed', 'partial', 'unfixed', 'none'])
+        self.assertEqual([plist.item(i).toolTip() for i in range(4)], ['', '', '', ''])
+
+        # 1) 압정 영역 클릭은 읽기 전용: fixed와 dirty가 변하지 않고 해당 사람 선택만 바뀐다.
+        before_fixed = [dict(item.fixed) for item in editor.doc.people]
+        for row in (1, 2, 0, 3):
+            self.click_list_pin(plist, row)
+            self.assertEqual(plist.currentRow(), row)
+            self.assertEqual([dict(item.fixed) for item in editor.doc.people], before_fixed)
+            self.assertFalse(w.people_dirty['2027'])
+
+        # 2) 입력 화면에서 고정 추가·해제 시 사람 목록 압정 상태가 즉시 갱신된다.
+        plist.setCurrentRow(2)  # 미고정 (사업1)
+        editor.allocations.setCurrentCell(0, editor.PROJECT)
+        editor.add_fixed()
+        self.assertEqual(plist.pin_state(2), 'fixed')
+        editor.fixed.setCurrentCell(0, 1)
+        editor.remove_fixed()
+        self.assertEqual(plist.pin_state(2), 'unfixed')
+
+        # 3) 참여율이 비어 있어도 fixed 항목이 남아 있으면 partial로 고정 존재를 표시한다.
+        editor.doc.people[2].allocations['사업1'] = ''
+        editor.doc.people[2].fixed['사업1'] = ['0.00000'] * 12
+        self.assertEqual(plist.pin_state(2), 'partial')
+        editor.doc.people[2].allocations['사업1'] = '1.00000'
+        editor.doc.people[2].fixed.clear()
+        editor.mark_person(2)
+        self.assertEqual(plist.pin_state(2), 'unfixed')
+
+        # 4) 드래그로 사람 순서를 바꿔도 각 사람의 압정 상태가 정확히 따라간다.
+        start = theme.pin_hit_rect(plist.visualItemRect(plist.item(0))).center()
+        end = plist.visualItemRect(plist.item(2)).center()
+        QTest.mousePress(plist.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        QTest.mouseMove(plist.viewport(), end, 25)
+        QTest.mouseRelease(plist.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+        self.app.processEvents()
+        self.assertEqual([plist.item(i).text() for i in range(4)], ['홍길동', '미고정', '전체고정', '전공백'])
+        self.assertEqual([plist.pin_state(i) for i in range(4)], ['partial', 'unfixed', 'fixed', 'none'])
+
+        # 5) 결과 화면에서 압정을 토글하면 입력 탭 사람 목록의 압정 상태도 즉시 동기화된다.
+        w.generate()
+        self.assertIsNotNone(w.result)
+        self.assertTrue(w.toggle_person_pin('미고정'))
+        self.assertEqual(plist.pin_state(1), 'fixed')
+        self.assertTrue(w.toggle_person_pin('미고정'))
+        self.assertEqual(plist.pin_state(1), 'unfixed')
+
+        # 6) 실제 렌더링에서 압정 영역이 그려지며 none 행은 비어 있고, 오류 항목은 붉은 글씨를 유지한다.
+        w.show_page(w.INPUT_PAGE)
+        w.input_tabs.setCurrentIndex(w.PEOPLE_TAB)
+        plist.setCurrentRow(3)  # 앞 3행을 비선택 상태로 그려 배경 대비를 확인한다.
+        self.app.processEvents()
+        image = plist.viewport().grab().toImage()
+        bg = image.pixelColor(QPoint(plist.viewport().width() - 3, 2))
+        for row in (0, 1, 2):
+            rect = theme.pin_icon_rect(plist.visualItemRect(plist.item(row)))
+            painted = any(image.pixelColor(x, y) != bg
+                          for x in range(rect.left(), rect.right() + 1)
+                          for y in range(rect.top(), rect.bottom() + 1))
+            self.assertTrue(painted, f'row {row} pin icon not painted')
+        # none 행(전공백)은 비선택 상태에서 압정 영역이 배경 그대로 비어 있다.
+        plist.setCurrentRow(0)
+        self.app.processEvents()
+        image_none = plist.viewport().grab().toImage()
+        none_rect = theme.pin_icon_rect(plist.visualItemRect(plist.item(3)))
+        none_bg = image_none.pixelColor(QPoint(plist.viewport().width() - 3, none_rect.center().y()))
+        none_painted = any(image_none.pixelColor(x, y) != none_bg
+                           for x in range(none_rect.left(), none_rect.right() + 1)
+                           for y in range(none_rect.top(), none_rect.bottom() + 1))
+        self.assertFalse(none_painted, 'none row should not paint pin icon')
+        # 합계 오류가 있는 사람은 목록에서 붉은 글씨(error_text)를 유지한다.
+        editor.doc.people[1].allocations['사업1'] = '0.50000'
+        editor.mark_person(1)
+        self.assertEqual(plist.item(1).foreground().color(), theme.error_text())
+        self.assertTrue(plist.item(1).toolTip())
+
     @staticmethod
     def texts(view):
         model = view.model()

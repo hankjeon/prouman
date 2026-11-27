@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFile
 from . import theme
 from .document import (DocumentError, PeopleDoc, PlanDoc, detect_kind, dump_people, dump_plan, dump_projects,
                        plan_from_people, read_people, read_plan, read_projects, valid_year)
-from .editor import PeopleEditor, ProjectEditor, SelectionDelegate
+from .editor import PeopleEditor, PinListDelegate, ProjectEditor, SelectionDelegate
 from .engine import calculate
 from .loading import decode_text, load_inputs
 from .models import amount
@@ -124,36 +124,6 @@ class PinTableDelegate(SelectionDelegate):
         return size
 
 
-class PinListDelegate(QStyledItemDelegate):
-    """결과 개인상세 사람 목록의 이름 왼쪽에 고정 상태 압정 아이콘을 그린다."""
-
-    def paint(self, painter, option, index):
-        view = self.parent()
-        name = index.data(Qt.DisplayRole) or ''
-        state = view.pin_state(name) if hasattr(view, 'pin_state') else 'none'
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        bg = QStyleOptionViewItem(option)
-        self.initStyleOption(bg, index)
-        bg.text = ''
-        style = bg.widget.style() if bg.widget is not None else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, bg, painter, bg.widget)
-        if state != 'none':
-            theme.draw_pin_icon(painter, theme.pin_icon_rect(option.rect), state, selected=selected)
-        text_rect = option.rect.adjusted(theme.pin_text_offset(option.rect), 0, -4, 0)
-        role = QPalette.HighlightedText if selected else QPalette.Text
-        painter.save()
-        painter.setFont(bg.font)
-        elided = bg.fontMetrics.elidedText(name, Qt.ElideRight, max(0, text_rect.width()))
-        style.drawItemText(painter, text_rect, int(Qt.AlignLeft | Qt.AlignVCenter), bg.palette,
-                           bool(bg.state & QStyle.StateFlag.State_Enabled), elided, role)
-        painter.restore()
-
-    def sizeHint(self, option, index):
-        size = super().sizeHint(option, index)
-        height = max(size.height(), option.fontMetrics.height() + 8)
-        return QSize(size.width() + theme.pin_icon_size(height) + 14, height)
-
-
 class PinListWidget(QListWidget):
     """사람 이름 앞에 고정/부분고정/미고정 압정 버튼을 표시하고 토글하는 목록."""
 
@@ -173,7 +143,8 @@ class PinListWidget(QListWidget):
     def pin_info(self, name):
         return self._pin_provider(name) if self._pin_provider is not None else ('none', '')
 
-    def pin_state(self, name):
+    def pin_state(self, target):
+        name = target.data(Qt.DisplayRole) or '' if hasattr(target, 'data') else target
         return self.pin_info(name)[0]
 
     def pin_hit(self, item, position):
