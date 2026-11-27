@@ -1,0 +1,37 @@
+name: Build Windows EXE
+
+# 배포용 실행파일은 명시적으로 요청할 때만 만든다 (AGENTS.md 규칙).
+# 자동 실행 트리거를 두지 않고 수동 실행(workflow_dispatch)만 허용한다.
+on:
+  workflow_dispatch:
+
+jobs:
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # GUI 검증 환경(README): Python 3.14 · Windows 11
+          python-version: "3.14"
+
+      - name: Create venv and install build dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\python.exe -m pip install -r requirements-build.txt
+
+      - name: Build Prouman.exe
+        shell: pwsh
+        run: .\build_win.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prouman-win
+          path: publish/win/Prouman.exe
+          if-no-files-found: error
