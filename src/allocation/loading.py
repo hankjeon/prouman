@@ -16,6 +16,9 @@ class Number(str):
         obj.kind = kind
         return obj
 
+    def __reduce__(self):
+        return (Number, (str(self), self.kind))
+
 
 class Missing:
     def __repr__(self):
@@ -23,6 +26,28 @@ class Missing:
 
 
 MISSING = Missing()
+
+
+def validate_metadata(value):
+    """일반 YAML 자료만 허용하고 순환 구조를 거부한다."""
+    if type(value) is not dict:
+        raise ValueError('metadata는 mapping이어야 합니다.')
+    def visit(item, active):
+        if type(item) in (dict, list):
+            if id(item) in active:
+                raise ValueError('metadata의 순환 참조는 지원하지 않습니다.')
+            active.add(id(item))
+            if type(item) is dict:
+                for key, child in item.items():
+                    visit(key, active)
+                    visit(child, active)
+            else:
+                for child in item:
+                    visit(child, active)
+            active.remove(id(item))
+        elif not (item is None or type(item) in (str, bool, int, float) or isinstance(item, Number)):
+            raise ValueError('metadata에 지원하지 않는 자료형이 있습니다.')
+    visit(value, set())
 QUANTITY_PATTERN = re.compile(r'[0-9]+(?:\.[0-9]{1,5})?')
 QUANTITY_HINT = ('0 이상, 소수 5자리 이하 숫자를 입력하세요 (예: 0.5). '
                  '소수 6자리 이상은 끝자리가 0이어도 오류이며 자동으로 반올림하지 않습니다.')
@@ -169,12 +194,21 @@ class Validator:
                    '실재하는 날짜의 시작일~종료일; YYYY-M-D 또는 YYYY.M.D (끝 점 선택), 시작일 ≤ 종료일')
         return None
 
+    def check_metadata(self, value, where):
+        if 'metadata' in value:
+            try:
+                validate_metadata(value['metadata'])
+            except (ValueError, RecursionError):
+                self.error('E003', where + '.metadata', '<지원하지 않는 metadata>', '순환 없는 일반 YAML mapping')
+
     def projects(self, value, path):
-        root = self.mapping(value, path, {'projects'})
+        root = self.mapping(value, path, {'projects'}, {'metadata'})
+        self.check_metadata(root, path)
         projects = {}
         for idx, raw in enumerate(self.sequence(root.get('projects', MISSING), f'{path}.projects', True)):
             where = f'{path}.projects[{idx}]'
-            item = self.mapping(raw, where, {'name', 'alias', 'period', 'yearly'})
+            item = self.mapping(raw, where, {'name', 'alias', 'period', 'yearly'}, {'metadata'})
+            self.check_metadata(item, where)
             name = self.text(item.get('name', MISSING), where + '.name', trim=True)
             alias = self.text(item.get('alias', MISSING), where + '.alias', trim=True, alias=True)
             period = self.period(item.get('period', MISSING), where + '.period')
@@ -209,14 +243,16 @@ class Validator:
         return projects
 
     def people(self, value, path, projects, check_aliases=True):
-        root = self.mapping(value, path, {'year', 'people'}, {'stage'})
+        root = self.mapping(value, path, {'year', 'people'}, {'stage', 'metadata'})
+        self.check_metadata(root, path)
         year = self.integer(root.get('year', MISSING), path + '.year', 1000, 9999)
         if 'stage' in root and root['stage'] != 'confirmed':
             self.error('E003', path + '.stage', root['stage'], '확정 파일의 stage: confirmed; 계획 파일은 계획 화면에서 열기')
         people = {}
         for idx, raw in enumerate(self.sequence(root.get('people', MISSING), path + '.people', True)):
             where = f'{path}.people[{idx}]'
-            item = self.mapping(raw, where, {'name', 'allocations'}, {'absences', 'fixed'})
+            item = self.mapping(raw, where, {'name', 'allocations'}, {'absences', 'fixed', 'metadata'})
+            self.check_metadata(item, where)
             name = self.text(item.get('name', MISSING), where + '.name')
             absences = []
             for j, raw_absence in enumerate(self.sequence(item.get('absences', []), where + '.absences')):
@@ -274,7 +310,8 @@ class Validator:
         return year, people
 
     def plan_people(self, value, path, projects, check_aliases=True):
-        root = self.mapping(value, path, {'year', 'stage', 'people'})
+        root = self.mapping(value, path, {'year', 'stage', 'people'}, {'metadata'})
+        self.check_metadata(root, path)
         year = self.integer(root.get('year', MISSING), path + '.year', 1000, 9999)
         if root.get('stage') != 'planning':
             self.error('E003', path + '.stage', root.get('stage', MISSING), 'stage: planning')
@@ -282,7 +319,8 @@ class Validator:
         for idx, raw in enumerate(self.sequence(root.get('people', MISSING), f'{path}.people', True)):
             where = f'{path}.people[{idx}]'
             item, migrated = migrate_plan_person(raw) if type(raw) is dict else (raw, False)
-            item = self.mapping(item, where, {'name', 'draft'}, {'absences', 'priorities', 'allocations'})
+            item = self.mapping(item, where, {'name', 'draft'}, {'absences', 'priorities', 'allocations', 'metadata'})
+            self.check_metadata(item, where)
             if migrated:
                 self.warning('W007', where, '이전 계획 형식', '새 계획 형식',
                              '참여·순위와 결과를 보존하고 참고 점수는 0으로 변환했습니다.')

@@ -5,36 +5,39 @@
 때마다 현재 팔레트를 기준으로 고른다. `is_dark()`을 바꾸면 라이트/다크
 짝을 테스트에서 확인할 수 있다.
 """
+import sys
+
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPalette, QPen
 
 # 라이트(예전 Windows 회색 계열에서 쓰던 값)와 다크 짝. 다크 짝은 흰 글자가
 # 보이는 어두운 틴트로 고른다.
 LIGHT = {
-    'current_row': '#eef5ff',
-    'current_cell': '#1a73e8',
-    'problem': '#ffd6d6',
-    'computed': '#f0f0f0',
-    'excluded': '#e6dcff',
-    'outside': '#e4e4e4',
-    'error_text': '#c62828',
-    'warning_text': '#b26a00',
-    'pin_fixed': '#1a73e8',
-    'pin_partial': '#d97706',
-    'pin_unfixed': '#8c96a0',
+    'window': '#F3F3F3', 'surface': '#FFFFFF', 'text': '#1F1F1F',
+    'header': '#E8EBEF', 'grid': '#D1D1D1', 'hover': '#EDF4FC',
+    'current_row': '#EDF4FC', 'current_cell': '#185ABD',
+    'problem': '#FDE7E9', 'computed': '#F3F3F3',
+    'excluded': '#EEE7F8', 'outside': '#E8EBEF',
+    'error_text': '#A4262C', 'warning_text': '#805500',
+    'pin_fixed': '#185ABD',
+    'pin_partial': '#9A4D00',
+    'pin_unfixed': '#56616F',
+    'list_selection': '#CFE4FA',
+    'list_selection_text': '#1F1F1F',
 }
 DARK = {
-    'current_row': '#333c47',
-    'current_cell': '#7aa7ff',
-    'problem': '#5c2b2e',
-    'computed': '#3d3d3d',
-    'excluded': '#3d3261',
+    'window': '#1F1F1F', 'surface': '#292929', 'text': '#F2F2F2',
+    'header': '#333333', 'grid': '#525252', 'hover': '#333E4A',
+    'current_row': '#333E4A', 'current_cell': '#8CC4FF',
+    'problem': '#4A2528', 'computed': '#333333',
+    'excluded': '#393047',
     'outside': '#333333',
-    'error_text': '#ff8a80',
-    'warning_text': '#ffb74d',
-    'pin_fixed': '#7aa7ff',
-    'pin_partial': '#ffb74d',
-    'pin_unfixed': '#8b949e',
+    'error_text': '#FFB3BA', 'warning_text': '#FFD580',
+    'pin_fixed': '#8CC4FF',
+    'pin_partial': '#FFBE66',
+    'pin_unfixed': '#B4BEC9',
+    'list_selection': '#264F78',
+    'list_selection_text': '#FFFFFF',
 }
 
 
@@ -47,7 +50,35 @@ def is_dark():
 
 
 def _pair(key):
+    app = QGuiApplication.instance()
+    if app is not None and high_contrast_active():
+        roles = {'list_selection': QPalette.Highlight, 'list_selection_text': QPalette.HighlightedText,
+                 'current_row': QPalette.Base, 'current_cell': QPalette.Highlight,
+                 'problem': QPalette.Base, 'computed': QPalette.Window, 'excluded': QPalette.Window,
+                 'outside': QPalette.Window, 'error_text': QPalette.Text, 'warning_text': QPalette.Text,
+                 'pin_fixed': QPalette.Text, 'pin_partial': QPalette.Text, 'pin_unfixed': QPalette.Text}
+        if key in roles:
+            return app.palette().color(roles[key])
     return QColor(DARK[key] if is_dark() else LIGHT[key])
+
+
+def high_contrast_active():
+    """Windows 강제 색상 상태만 조회하며 시스템 설정은 변경하지 않는다."""
+    if sys.platform != 'win32':
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        class HighContrast(ctypes.Structure):
+            _fields_ = [('cbSize', wintypes.UINT), ('dwFlags', wintypes.DWORD),
+                        ('lpszDefaultScheme', wintypes.LPWSTR)]
+        value = HighContrast()
+        value.cbSize = ctypes.sizeof(value)
+        return bool(ctypes.windll.user32.SystemParametersInfoW(0x0042, value.cbSize,
+                                                                ctypes.byref(value), 0)
+                    and value.dwFlags & 1)
+    except (AttributeError, OSError):
+        return False
 
 
 def palette():
@@ -57,20 +88,49 @@ def palette():
 
 
 def selection_color():
-    """선택 셀 배경. 시스템 강조색을 그대로 써서 테마와 맞춘다."""
+    """일반 모드는 공용 선택색, 고대비는 사용자 시스템 강조색."""
     pal = palette()
-    return pal.color(QPalette.Highlight) if pal is not None else QColor(LIGHT['current_cell'])
+    return pal.color(QPalette.Highlight) if high_contrast_active() and pal is not None else _pair('list_selection')
 
 
 def selected_text_color():
-    """선택 셀 글자. 시스템 강조 글자색이라 배경과 항상 대비된다."""
+    """선택 배경과 짝을 이루는 글자색."""
     pal = palette()
-    return pal.color(QPalette.HighlightedText) if pal is not None else QColor('#ffffff')
+    return pal.color(QPalette.HighlightedText) if high_contrast_active() and pal is not None else _pair('list_selection_text')
 
 
 def normal_text_color():
     pal = palette()
-    return pal.color(QPalette.WindowText) if pal is not None else QColor('#000000')
+    return pal.color(QPalette.WindowText) if high_contrast_active() and pal is not None else _pair('text')
+
+
+def apply_window_theme(window):
+    """창 단위로 팔레트를 적용해 시스템 팔레트 자체와 다크 판정을 바꾸지 않는다."""
+    app = QGuiApplication.instance()
+    if app is None:
+        return
+    from PySide6.QtWidgets import QHeaderView
+    pal = QPalette(app.palette())
+    if high_contrast_active():
+        window.setStyleSheet('')
+        window.setPalette(pal)
+        for header in window.findChildren(QHeaderView):
+            header.setStyleSheet('')
+        return
+    colors = DARK if is_dark() else LIGHT
+    for role, key in ((QPalette.Window, 'window'), (QPalette.WindowText, 'text'),
+                      (QPalette.Base, 'surface'), (QPalette.AlternateBase, 'window'),
+                      (QPalette.Text, 'text'), (QPalette.Button, 'header'),
+                      (QPalette.ButtonText, 'text'), (QPalette.Highlight, 'list_selection'),
+                      (QPalette.HighlightedText, 'list_selection_text')):
+        pal.setColor(role, QColor(colors[key]))
+    window.setStyleSheet('')
+    window.setPalette(pal)
+    for header in window.findChildren(QHeaderView):
+        header.setStyleSheet(
+            f"QHeaderView {{ background-color: {colors['header']}; }}"
+            f"QHeaderView::section {{ background-color: {colors['header']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['grid']}; padding: 3px; }}")
 
 
 def current_row_color():
@@ -142,7 +202,7 @@ def pin_text_offset(cell_rect):
     return pin_icon_size(cell_rect.height()) + 10
 
 
-def draw_pin_icon(painter, rect, state, selected=False):
+def draw_pin_icon(painter, rect, state, selected=False, state_colors=False):
     """압정 벡터 아이콘을 그린다. state는 'fixed' | 'partial' | 'unfixed'."""
     if state not in ('fixed', 'partial', 'unfixed'):
         return
@@ -174,28 +234,26 @@ def draw_pin_icon(painter, rect, state, selected=False):
     body.lineTo(5.0, 4.0)
     body.closeSubpath()
 
-    if selected:
+    if high_contrast_active():
+        stroke = selected_text_color() if selected else normal_text_color()
+        fill = stroke if state in ('fixed', 'partial') else None
+    elif selected and not state_colors:
         base = selected_text_color()
         if state == 'fixed':
-            stroke = base
-            fill = base
+            stroke = fill = base
         elif state == 'partial':
-            stroke = base
-            fill = pin_partial_color()
+            stroke, fill = base, pin_partial_color()
         else:
-            stroke = QColor(base)
-            stroke.setAlpha(160)
-            fill = None
+            stroke, fill = base, None
+    elif state == 'fixed':
+        stroke = pin_fixed_color()
+        fill = stroke
+    elif state == 'partial':
+        stroke = pin_partial_color()
+        fill = stroke
     else:
-        if state == 'fixed':
-            stroke = pin_fixed_color()
-            fill = stroke
-        elif state == 'partial':
-            stroke = pin_partial_color()
-            fill = stroke
-        else:
-            stroke = pin_unfixed_color()
-            fill = None
+        stroke = pin_unfixed_color()
+        fill = None
 
     if state == 'fixed':
         painter.setPen(QPen(stroke, 1.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -246,11 +304,12 @@ def nav_stylesheet():
     pal = palette()
     if pal is None:
         return ''
-    window = pal.color(QPalette.Window).name()
-    text = pal.color(QPalette.WindowText).name()
-    highlight = pal.color(QPalette.Highlight).name()
-    highlighted = pal.color(QPalette.HighlightedText).name()
-    hover = mix(pal.color(QPalette.Highlight), pal.color(QPalette.Window), 0.25).name()
+    window = pal.color(QPalette.Window).name() if high_contrast_active() else _pair('window').name()
+    text = normal_text_color().name()
+    highlight = selection_color().name()
+    highlighted = selected_text_color().name()
+    hover = (mix(pal.color(QPalette.Highlight), pal.color(QPalette.Window), 0.25).name()
+             if high_contrast_active() else _pair('hover').name())
     return (f'#nav {{ background-color: {window}; }}'
             f'QToolButton {{ color: {text}; border: none; padding: 10px 6px; text-align: left; }}'
             f'QToolButton:checked {{ background-color: {highlight}; color: {highlighted}; font-weight: bold; }}'

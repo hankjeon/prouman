@@ -15,7 +15,7 @@ from datetime import date
 import yaml
 
 from .engine import absence_units
-from .loading import QUANTITY_HINT, QUANTITY_PATTERN, Loader, migrate_plan_person, parse_date
+from .loading import QUANTITY_HINT, QUANTITY_PATTERN, Loader, Number, migrate_plan_person, parse_date, validate_metadata
 from .models import Person
 
 HEADER = '# 인력 배분 GUI에서 저장한 파일입니다.'
@@ -24,6 +24,13 @@ MONTH_SPLIT = re.compile(r'[\s,]+')
 
 class DocumentError(Exception):
     """표 편집기로 열 수 없는 YAML 구조."""
+
+
+class ProjectList(list):
+    """사업 목록과 파일 공통 확장 정보."""
+    def __init__(self, values=(), metadata=None):
+        super().__init__(values)
+        self.metadata = metadata
 
 
 @dataclass
@@ -40,6 +47,7 @@ class ProjectEntry:
     start: str = ''
     end: str = ''
     years: list = field(default_factory=list)
+    metadata: dict | None = None
 
 
 @dataclass
@@ -55,12 +63,14 @@ class PersonEntry:
     allocations: dict = field(default_factory=dict)  # 사업약칭 → 참여율 문자열
     absences: list = field(default_factory=list)
     fixed: dict = field(default_factory=dict)  # 사업약칭 → 1~12월 고정 수량 문자열
+    metadata: dict | None = None
 
 
 @dataclass
 class PeopleDoc:
     year: str = field(default_factory=lambda: str(date.today().year))
     people: list = field(default_factory=list)
+    metadata: dict | None = None
 
 
 @dataclass
@@ -70,6 +80,7 @@ class PlanPersonEntry:
     priorities: dict = field(default_factory=dict)  # 사업약칭 → 순위 문자열
     allocations: dict | None = None  # None은 아직 결과가 없음을 뜻한다.
     absences: list = field(default_factory=list)
+    metadata: dict | None = None
 
 
 @dataclass
@@ -77,6 +88,7 @@ class PlanDoc:
     year: str = field(default_factory=lambda: str(date.today().year))
     people: list = field(default_factory=list)
     migrated: bool = False
+    metadata: dict | None = None
 
 
 def plan_from_people(doc, year):
@@ -84,7 +96,9 @@ def plan_from_people(doc, year):
     if not valid_year(str(year)):
         raise DocumentError('계획 연도는 4자리 연도여야 합니다.')
     return PlanDoc(str(year), [PlanPersonEntry(person.name, deepcopy(person.allocations),
-                                              absences=deepcopy(person.absences)) for person in doc.people])
+                                              absences=deepcopy(person.absences),
+                                              metadata=deepcopy(person.metadata)) for person in doc.people],
+                   metadata=deepcopy(doc.metadata))
 
 
 # --- YAML 읽기 -------------------------------------------------------------------------------
@@ -113,6 +127,18 @@ class _Reader:
             self.dropped += [f'{where}.{key}' for key in value if key not in fields]
         return value
 
+    def metadata(self, mapping, where):
+        if 'metadata' not in mapping:
+            return None
+        value = mapping['metadata']
+        if type(value) is not dict:
+            raise DocumentError(f'{where}.metadata: mapping이어야 합니다.')
+        # 중복이 있으면 어느 값을 살릴지 선택할 수 없으므로 재저장을 허용하지 않는다.
+        if any('중복 키' in entry for entry in self.dropped):
+            raise DocumentError('중복 YAML 키를 먼저 수정하세요.')
+        _metadata_lines(value)  # 지원하지 않는 자료형과 순환 참조는 읽을 때 차단한다.
+        return value
+
     @staticmethod
     def sequence(value, where):
         if value is None:
@@ -139,14 +165,15 @@ class _Reader:
 def read_projects(text):
     """사업 YAML을 (ProjectEntry 목록, 무시한 항목)으로 읽는다."""
     reader = _Reader()
-    root = reader.mapping(reader.parse(text), 'projects.yaml', {'projects'})
-    projects = []
+    root = reader.mapping(reader.parse(text), 'projects.yaml', {'projects', 'metadata'})
+    projects = ProjectList(metadata=reader.metadata(root, 'projects.yaml'))
     for idx, raw in enumerate(reader.sequence(root.get('projects'), 'projects')):
         where = f'projects[{idx}]'
-        item = reader.mapping(raw, where, {'name', 'alias', 'period', 'yearly'})
+        item = reader.mapping(raw, where, {'name', 'alias', 'period', 'yearly', 'metadata'})
         project = ProjectEntry(reader.scalar(item.get('name'), where + '.name').strip(),
                                reader.scalar(item.get('alias'), where + '.alias').strip(),
                                *reader.period(item.get('period'), where + '.period'))
+        project.metadata = reader.metadata(item, where)
         for key, raw_budget in reader.mapping(item.get('yearly'), where + '.yearly').items():
             loc = f'{where}.yearly[{key}]'
             budget = reader.mapping(raw_budget, loc, {'allocated_manpower', 'excluded_months'})
@@ -162,16 +189,18 @@ def read_projects(text):
 def read_people(text):
     """사람 YAML을 (PeopleDoc, 무시한 항목)으로 읽는다."""
     reader = _Reader()
-    root = reader.mapping(reader.parse(text), 'people.yaml', {'year', 'stage', 'people'})
+    root = reader.mapping(reader.parse(text), 'people.yaml', {'year', 'stage', 'people', 'metadata'})
     if 'fixed' in root:
         raise DocumentError('fixed는 파일 최상위가 아니라 people의 각 사람 아래 allocations와 같은 깊이에 둡니다.')
     if 'stage' in root and root['stage'] != 'confirmed':
         raise DocumentError('확정 사람 파일은 stage: confirmed여야 합니다.')
     doc = PeopleDoc(reader.scalar(root.get('year'), 'year'), [])
+    doc.metadata = reader.metadata(root, 'people.yaml')
     for idx, raw in enumerate(reader.sequence(root.get('people'), 'people')):
         where = f'people[{idx}]'
-        item = reader.mapping(raw, where, {'name', 'allocations', 'absences', 'fixed'})
+        item = reader.mapping(raw, where, {'name', 'allocations', 'absences', 'fixed', 'metadata'})
         person = PersonEntry(reader.scalar(item.get('name'), where + '.name'))
+        person.metadata = reader.metadata(item, where)
         for key, value in reader.mapping(item.get('allocations'), where + '.allocations').items():
             alias = reader.scalar(key, where + '.allocations').strip()
             if alias in person.allocations:
@@ -202,7 +231,7 @@ def read_people(text):
 def read_plan(text):
     """계획 파일을 편집 가능한 문서로 읽는다. 중복 키는 계획에서 버리지 않는다."""
     reader = _Reader()
-    root = reader.mapping(reader.parse(text), 'plan.yaml', {'year', 'stage', 'people'})
+    root = reader.mapping(reader.parse(text), 'plan.yaml', {'year', 'stage', 'people', 'metadata'})
     if reader.dropped:
         raise DocumentError('중복 또는 지원하지 않는 키: ' + ', '.join(reader.dropped))
     if root.get('stage') != 'planning':
@@ -210,14 +239,16 @@ def read_plan(text):
     if type(root.get('people')) is not list:
         raise DocumentError('people: 사람 목록이어야 합니다.')
     doc = PlanDoc(reader.scalar(root.get('year'), 'year'), [])
+    doc.metadata = reader.metadata(root, 'plan.yaml')
     for idx, raw in enumerate(reader.sequence(root.get('people'), 'people')):
         where = f'people[{idx}]'
         item, migrated = migrate_plan_person(raw) if type(raw) is dict else (raw, False)
         doc.migrated = doc.migrated or migrated
-        item = reader.mapping(item, where, {'name', 'draft', 'priorities', 'allocations', 'absences'})
+        item = reader.mapping(item, where, {'name', 'draft', 'priorities', 'allocations', 'absences', 'metadata'})
         if 'draft' not in item:
             raise DocumentError(f'{where}.draft: 참여 사업과 참고 점수가 필요합니다.')
         person = PlanPersonEntry(reader.scalar(item.get('name'), where + '.name'))
+        person.metadata = reader.metadata(item, where)
         for field_name in ('draft', 'priorities', 'allocations'):
             if field_name == 'allocations' and field_name not in item:
                 continue
@@ -267,18 +298,39 @@ def _integer(value):
     return value if re.fullmatch(r'[0-9]+', value) else _text(value)
 
 
+class _MetadataDumper(yaml.SafeDumper):
+    pass
+
+
+_MetadataDumper.add_representer(Number, lambda dumper, value: dumper.represent_scalar(
+    'tag:yaml.org,2002:' + value.kind, str(value)))
+
+
+def _metadata_lines(value, indent=0):
+    if value is None:
+        return []
+    try:
+        validate_metadata(value)
+    except (ValueError, RecursionError) as exc:
+        raise DocumentError(str(exc)) from exc
+    rendered = yaml.dump({'metadata': value}, Dumper=_MetadataDumper, allow_unicode=True,
+                         sort_keys=False, default_flow_style=False).rstrip().splitlines()
+    return [(' ' * indent) + line for line in rendered]
+
+
 def month_tokens(text):
     return [token for token in MONTH_SPLIT.split(text.strip()) if token]
 
 
 def dump_projects(projects):
-    lines = [HEADER]
+    lines = [HEADER] + _metadata_lines(getattr(projects, 'metadata', None))
     if not projects:
         return '\n'.join(lines + ['projects: []']) + '\n'
     lines.append('projects:')
     for project in projects:
         lines += [f'  - name: {_text(project.name)}', f'    alias: {_text(project.alias)}',
                   f'    period: {_text(f"{project.start.strip()}~{project.end.strip()}")}']
+        lines += _metadata_lines(project.metadata, 4)
         if not project.years:
             lines.append('    yearly: {}')
             continue
@@ -292,19 +344,22 @@ def dump_projects(projects):
 
 
 def dump_people(doc):
-    lines = [HEADER, f'year: {_integer(doc.year)}', 'stage: confirmed']
+    lines = [HEADER, f'year: {_integer(doc.year)}', 'stage: confirmed'] + _metadata_lines(doc.metadata)
     if not doc.people:
         return '\n'.join(lines + ['people: []']) + '\n'
     lines.append('people:')
     for person in doc.people:
         lines.append(f'  - name: {_text(person.name)}')
+        lines += _metadata_lines(person.metadata, 4)
         if person.absences:
             lines.append('    absences:')
             for absence in person.absences:
                 lines.append(f'      - period: {_text(f"{absence.start.strip()}~{absence.end.strip()}")}')
                 if absence.reason:
                     lines.append(f'        reason: {_text(absence.reason)}')
-        allocations = {alias: value for alias, value in person.allocations.items() if value.strip()}
+        # 빈 입력도 미완성 작업값이다. 행 삭제는 편집기에서 키를 제거하므로
+        # 빈 값을 생략하면 삭제와 구별되지 않고 다시 열 때 원문이 사라진다.
+        allocations = person.allocations
         if not allocations:
             lines.append('    allocations: {}')
         else:
@@ -318,12 +373,13 @@ def dump_people(doc):
 
 
 def dump_plan(doc):
-    lines = [HEADER, f'year: {_integer(doc.year)}', 'stage: planning']
+    lines = [HEADER, f'year: {_integer(doc.year)}', 'stage: planning'] + _metadata_lines(doc.metadata)
     if not doc.people:
         return '\n'.join(lines + ['people: []']) + '\n'
     lines.append('people:')
     for person in doc.people:
         lines.append(f'  - name: {_text(person.name)}')
+        lines += _metadata_lines(person.metadata, 4)
         if person.absences:
             lines.append('    absences:')
             for absence in person.absences:

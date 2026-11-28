@@ -1,9 +1,10 @@
 """YAML을 몰라도 사업·사람 입력을 표로 편집하는 위젯."""
 from bisect import bisect_left
 from datetime import date
+import re
 
-from PySide6.QtCore import QDate, QEvent, QItemSelection, QItemSelectionModel, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette
+from PySide6.QtCore import QDate, QEvent, QItemSelection, QItemSelectionModel, QSize, Qt, QTimer, Signal, QRegularExpression
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette, QRegularExpressionValidator
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
@@ -19,6 +20,7 @@ from .table_order import TableOrderMixin, selection_text
 TRANSPARENT = QColor(0, 0, 0, 0)
 BASE_ROLE, NOTE_ROLE = Qt.UserRole + 1, Qt.UserRole + 2  # 칸의 기본 배경색과 안내(오류가 없을 때 보임)
 PERSON_ROLE = Qt.UserRole + 3  # 사람 목록 항목에 연결된 PersonEntry 참조
+PROBLEM_ROLE = Qt.UserRole + 4
 
 
 class SelectionDelegate(QStyledItemDelegate):
@@ -53,6 +55,11 @@ class SelectionDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, theme.current_row_color())
         super().paint(painter, plain, index)
         self.selected = False
+        severity = index.sibling(index.row(), 0).data(Qt.DisplayRole)
+        if self.selected or bool(state & QStyle.StateFlag.State_Selected):
+            if index.data(PROBLEM_ROLE) or severity in ('ERROR', 'WARNING'):
+                painter.fillRect(option.rect.adjusted(0, 1, -option.rect.width() + 3, -1),
+                                 theme.warning_text() if severity == 'WARNING' else theme.error_text())
         if state & QStyle.StateFlag.State_HasFocus:
             painter.save()
             painter.setPen(theme.current_cell_color())
@@ -77,6 +84,21 @@ class DateDelegate(SelectionDelegate):
         model.setData(index, editor.date().toString('yyyy-MM-dd'))
 
 
+NUMERIC_PATTERNS = {'decimal': r'-?[0-9]*(?:\.[0-9]*)?',
+                    'integer': r'-?[0-9]*', 'months': r'[0-9,\s-]*'}
+
+
+class NumericDelegate(SelectionDelegate):
+    def __init__(self, parent, kind):
+        super().__init__(parent)
+        self.kind = kind
+
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setValidator(QRegularExpressionValidator(QRegularExpression(NUMERIC_PATTERNS[self.kind]), editor))
+        return editor
+
+
 class EditTable(TableOrderMixin, QTableWidget):
     """편집 가능한 표. Ctrl+C로 복사, Ctrl+V로 엑셀 범위 붙여넣기, Delete로 선택 칸 지우기를 지원한다."""
 
@@ -94,6 +116,7 @@ class EditTable(TableOrderMixin, QTableWidget):
         # 자유 입력 칸(사유·제외 월)만 남는 너비를 채운다. 숫자·날짜 칸이 늘어나면 읽기 어렵다.
         self.horizontalHeader().setStretchLastSection(stretch_last)
         self.date_columns = ()
+        self.numeric_columns = {}
         self.setItemDelegate(SelectionDelegate(self))
         self.fit_rows()
         self.init_table_order()
@@ -102,6 +125,11 @@ class EditTable(TableOrderMixin, QTableWidget):
         self.date_columns = columns
         for column in columns:
             self.setItemDelegateForColumn(column, DateDelegate(self))
+
+    def set_numeric_columns(self, kind, *columns):
+        for column in columns:
+            self.numeric_columns[column] = kind
+            self.setItemDelegateForColumn(column, NumericDelegate(self, kind))
 
     def fit_rows(self):
         self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 10)
@@ -139,6 +167,7 @@ class EditTable(TableOrderMixin, QTableWidget):
             return
         base = item.data(BASE_ROLE)
         item.setBackground(theme.problem_color() if problem else base if base is not None else TRANSPARENT)
+        item.setData(PROBLEM_ROLE, problem)
         item.setToolTip('\n'.join(text for text in (problem, item.data(NOTE_ROLE) or '') if text))
 
     def keyPressEvent(self, event):
@@ -165,6 +194,17 @@ class EditTable(TableOrderMixin, QTableWidget):
         start = self.currentIndex()
         if not start.isValid() or not text:
             return
+        rows = [line.rstrip('\r').split('\t') for line in text.rstrip('\r\n').split('\n')]
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                column = start.column() + c
+                item = self.item(start.row() + r, column)
+                kind = self.numeric_columns.get(column)
+                if (item is not None and item.flags() & Qt.ItemIsEditable and kind
+                        and not re.fullmatch(NUMERIC_PATTERNS[kind], value.strip())):
+                    QToolTip.showText(self.viewport().mapToGlobal(self.visualItemRect(item).center()),
+                                      f'{start.row() + r + 1}행 {column + 1}열: 숫자 형식을 확인하세요.', self)
+                    return
         for r, line in enumerate(text.rstrip('\r\n').split('\n')):
             for c, value in enumerate(line.rstrip('\r').split('\t')):
                 item = self.item(start.row() + r, start.column() + c)
@@ -185,16 +225,33 @@ class PinListDelegate(QStyledItemDelegate):
         bg.text = ''
         style = bg.widget.style() if bg.widget is not None else QApplication.style()
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, bg, painter, bg.widget)
+        if selected:
+            painter.fillRect(option.rect, theme.selection_color())
+            if index.data(Qt.ForegroundRole) is not None:
+                painter.fillRect(option.rect.adjusted(0, 1, -option.rect.width() + 3, -1), theme.error_text())
+        elif not theme.high_contrast_active():
+            painter.fillRect(option.rect, theme._pair('surface'))
         if state != 'none':
-            theme.draw_pin_icon(painter, theme.pin_icon_rect(option.rect), state, selected=selected)
+            theme.draw_pin_icon(painter, theme.pin_icon_rect(option.rect), state, selected=selected,
+                                state_colors=True)
         text_rect = option.rect.adjusted(theme.pin_text_offset(option.rect), 0, -4, 0)
         role = QPalette.HighlightedText if selected else QPalette.Text
+        if selected:
+            problem = index.data(Qt.ForegroundRole)
+            color = (theme.error_text() if problem is not None and not theme.high_contrast_active()
+                     else theme.selected_text_color())
+            bg.palette.setColor(QPalette.HighlightedText, color)
         painter.save()
         painter.setFont(bg.font)
         elided = bg.fontMetrics.elidedText(name, Qt.ElideRight, max(0, text_rect.width()))
         style.drawItemText(painter, text_rect, int(Qt.AlignLeft | Qt.AlignVCenter), bg.palette,
                            bool(bg.state & QStyle.StateFlag.State_Enabled), elided, role)
         painter.restore()
+        if option.state & QStyle.StateFlag.State_HasFocus:
+            painter.save()
+            painter.setPen(theme.current_cell_color())
+            painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+            painter.restore()
 
     def updateEditorGeometry(self, editor, option, index):
         # 인라인 이름 편집 상자도 압정 오른쪽 텍스트 영역에 맞춰 배치한다.
@@ -337,6 +394,7 @@ class ProjectEditor(QWidget):
     """
 
     changed = Signal()
+    before_change = Signal()
     alias_renamed = Signal(str, str)
     alias_removed = Signal(str)
     NAME, ALIAS, START, END, TOTAL = range(5)
@@ -357,6 +415,8 @@ class ProjectEditor(QWidget):
         self.table.set_date_columns(self.START, self.END)
         self.table.horizontalHeader().setSectionResizeMode(self.NAME, QHeaderView.Stretch)
         self.grid = EditTable([''] * (self.YEARS + 1), row_band=True)
+        self.grid.set_numeric_columns('decimal', *range(self.YEARS))
+        self.grid.set_numeric_columns('months', self.YEARS)
         self.grid.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.grid.horizontalHeader().setSectionResizeMode(self.YEARS, QHeaderView.Fixed)
         self.grid.viewport().installEventFilter(self)
@@ -524,6 +584,7 @@ class ProjectEditor(QWidget):
     def reorder_project_rows(self, rows):
         if rows == list(range(len(self.projects))) or sorted(rows) != list(range(len(self.projects))):
             return
+        self.before_change.emit()
         selected = self.current()
         self.projects[:] = [self.projects[row] for row in rows]
         self.refresh()
@@ -584,6 +645,7 @@ class ProjectEditor(QWidget):
         old = getattr(project, field)
         if old == text:
             return
+        self.before_change.emit()
         setattr(project, field, text)
         self.revalidate()
         # 다른 사업과 겹치는 약칭으로(또는 겹치는 약칭에서) 바꿀 때는 그 사업의 참여율을 옮기지 않는다.
@@ -595,6 +657,7 @@ class ProjectEditor(QWidget):
         self.changed.emit()
 
     def add_project(self):
+        self.before_change.emit()
         self.projects.append(ProjectEntry())
         self.refresh()
         self.table.setCurrentCell(len(self.projects) - 1, self.NAME)
@@ -605,6 +668,7 @@ class ProjectEditor(QWidget):
         project = self.current()
         if project is None or not self.allow_remove(project):
             return
+        self.before_change.emit()
         row = self.table.currentRow()
         self.projects.pop(row)
         self.refresh()
@@ -795,6 +859,7 @@ class PeopleEditor(QWidget):
     """관리 연도, 왼쪽 사람 목록, 오른쪽 고른 사람의 참여 사업·참여율과 공백 기간."""
 
     changed = Signal()
+    before_change = Signal()
     year_changed = Signal()
     PROJECT, RATE, PROJECT_NAME = 0, 1, 2  # 사업명은 계산 칸이라 맨 끝에 두어 엑셀의 (사업, 참여율) 붙여넣기를 막지 않는다.
 
@@ -822,6 +887,7 @@ class PeopleEditor(QWidget):
 
         self.title = QLabel()
         self.allocations = EditTable(['사업', '참여율', '사업명'], stretch_last=True)
+        self.allocations.set_numeric_columns('decimal', self.RATE)
         self.allocations.setItemDelegateForColumn(self.PROJECT, ProjectDelegate(self.allocations, self.choices))
         self.allocations.itemChanged.connect(self.allocation_edited)
         self.totals = QLabel()
@@ -831,6 +897,7 @@ class PeopleEditor(QWidget):
         self.add_fixed_button = QPushButton('선택 사업 월 고정')
         self.add_fixed_button.clicked.connect(self.add_fixed)
         self.fixed = EditTable(['사업'] + [f'{m}월' for m in range(1, 13)] + ['고정 합계'])
+        self.fixed.set_numeric_columns('decimal', *range(1, 13))
         self.fixed.itemChanged.connect(self.fixed_edited)
         self.remove_fixed_button = QPushButton('선택 고정 해제')
         self.remove_fixed_button.clicked.connect(self.remove_fixed)
@@ -883,6 +950,7 @@ class PeopleEditor(QWidget):
         lookup = {person.name: person for person in self.doc.people}
         if len(lookup) != len(names) or set(lookup) != set(names):
             return
+        self.before_change.emit()
         self.doc.people[:] = [lookup[name] for name in names]
         self.overview.refresh()
         self.changed.emit()
@@ -893,6 +961,7 @@ class PeopleEditor(QWidget):
         lookup = {person.name: person for person in self.doc.people}
         if len(lookup) != len(names) or set(lookup) != set(names):
             return
+        self.before_change.emit()
         selected = self.current()
         self.doc.people[:] = [lookup[name] for name in names]
         self.refresh()
@@ -1002,6 +1071,7 @@ class PeopleEditor(QWidget):
                     if (name := '새 사람' if n == 1 else f'새 사람 {n}') not in names)
 
     def add_person(self):
+        self.before_change.emit()
         self.doc.people.append(PersonEntry(self.unique_name()))
         self.refresh()
         self.people_list.setCurrentRow(len(self.doc.people) - 1)
@@ -1012,6 +1082,7 @@ class PeopleEditor(QWidget):
         row = self.people_list.currentRow()
         if not 0 <= row < len(self.doc.people):
             return
+        self.before_change.emit()
         self.doc.people.pop(row)
         self.refresh()
         self.notify()
@@ -1030,6 +1101,7 @@ class PeopleEditor(QWidget):
             item.setText(person.name)
             self.people_list.blockSignals(False)
             return
+        self.before_change.emit()
         person.name = name
         self.people_list.blockSignals(True)
         item.setText(name)
@@ -1195,7 +1267,7 @@ class PeopleEditor(QWidget):
 
     def count_alias(self, alias, doc=None):
         target = self.doc if doc is None else doc
-        return sum(1 for person in target.people if person.allocations.get(alias, '').strip() or alias in person.fixed)
+        return sum(1 for person in target.people if alias in person.allocations or alias in person.fixed)
 
     def rename_alias(self, old, new, doc=None):
         target = self.doc if doc is None else doc

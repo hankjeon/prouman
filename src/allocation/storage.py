@@ -1,13 +1,15 @@
 """사업·사람 파일 묶음의 준비 후 교체와 실패 시 원본 복구."""
 import os
+import hashlib
 import shutil
 import tempfile
 from pathlib import Path
 
 
-def write_bundle(jobs, backed_up):
+def write_bundle(jobs, backed_up, expected=None, guards=None):
     """(경로, 문자열 또는 인코딩된 bytes) 묶음을 준비한 뒤 교체·실패 복구한다.
 
+    guards는 쓰지 않지만 이 작업이 의존하는 원본의 예상 지문이다.
     프로세스 강제 종료·정전까지 보장하는 디스크 트랜잭션은 아니다.
     복구 자체가 실패하면 그 경로를 오류로 알리고 복구용 임시 파일을 남긴다.
     """
@@ -29,6 +31,19 @@ def write_bundle(jobs, backed_up):
                 with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.prouman-restore-', delete=False) as stream:
                     originals[path] = Path(stream.name)
                 shutil.copy2(path, originals[path])
+        if expected is not None:
+            for path in staged:
+                if path not in expected:
+                    raise OSError(f'저장 지문이 없는 경로: {path}')
+                actual = hashlib.sha256(path.read_bytes()).digest() if path.exists() else None
+                if actual != expected[path]:
+                    raise OSError(f'외부 변경 충돌: {path}')
+        if guards is not None:
+            for raw_path, fingerprint in guards.items():
+                path = Path(raw_path).resolve()
+                actual = hashlib.sha256(path.read_bytes()).digest() if path.exists() else None
+                if actual != fingerprint:
+                    raise OSError(f'외부 변경 충돌: {path}')
         for path in staged:
             if originals[path] is not None and str(path) not in backed_up:
                 shutil.copy2(path, path.with_name(path.name + '.bak'))

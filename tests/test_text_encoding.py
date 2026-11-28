@@ -138,6 +138,7 @@ class EncodingGuiTests(unittest.TestCase):
         window.warn = lambda title, text: self.warnings.append((title, text))
         window.ask_export = lambda *_: 'discard'
         window.confirm = lambda *_: False
+        window.ask_copy_kind = lambda: '작업자료 묶음'
         self.windows.append(window)
         self.addCleanup(window.deleteLater)
         return window
@@ -180,6 +181,7 @@ class EncodingGuiTests(unittest.TestCase):
         original = encode_yaml(projects_text(), 'cp949')
         target.write_bytes(original)
         w.read_encodings.pop(str(target.resolve()), None)
+        w.confirm = lambda *_: True
         self.assertTrue(w.export_all(output))
         self.assertEqual(target.read_bytes(), original)
         self.assertEqual(target.with_name('projects.yaml.bak').read_bytes(), original)
@@ -213,7 +215,7 @@ class EncodingGuiTests(unittest.TestCase):
         with patch.object(QInputDialog, 'getItem', return_value=('UTF-8 BOM', True)):
             self.assertTrue(w.export_all(output, interactive=True))
         self.assertTrue((output / 'people/people_2027.yaml').read_bytes().startswith(b'\xef\xbb\xbf'))
-        self.assertEqual(w.document_encodings['people:2027'], {'utf-8-sig'})
+        self.assertEqual(w.document_encodings['people:2027'], {'cp949', 'utf-8-sig'})
 
     def test_unrepresentable_text_preflight_cancel_and_utf8_confirmation(self):
         p, h = self.inputs('cp949', 'cp949')
@@ -234,7 +236,7 @@ class EncodingGuiTests(unittest.TestCase):
         self.assertTrue(w.export_all(output, interactive=True))
         saved = output / 'people/people_2027.yaml'
         self.assertIn('😀', saved.read_text(encoding='utf-8'))
-        self.assertEqual(w.document_encodings['people:2027'], {'utf-8'})
+        self.assertEqual(w.document_encodings['people:2027'], {'cp949'})
         self.assertEqual([p.read_bytes(), h.read_bytes()], originals)
 
     def test_preflight_preserves_existing_bundle_and_dirty_state(self):
@@ -324,6 +326,7 @@ class EncodingGuiTests(unittest.TestCase):
         p, h = self.inputs('cp949', 'cp949')
         w = self.window()
         w.import_files([p, h])
+        w.choose_source_path = lambda *args: str(self.path / 'people_2028.yaml')
         w.people_editor.year_edited('2028')
         self.assertTrue(w.flush_year_edit())
         self.assertEqual(w.document_encodings['people:2028'], {'cp949'})
