@@ -2,6 +2,22 @@
 
 이 문서는 세션별 결정·실제 작업·검증·다음 할 일을 이어서 기록한다. 최신 세션을 위에 둔다. 기존 기능별 이력은 `docs/development-log.md`에 남아 있으며 이 문서로 소급해 옮기지 않는다. `완료`는 실제 수행·확인한 작업에만 사용한다.
 
+## 2026-11-28 — YAML 편집기 거터 폴딩 고정·글자 크기 보정
+
+- 사용자 실기 피드백("마우스로 눌러서 텍스트를 접으면 줄이 바뀌어 같은 자리에서 접었다 폈다 하기 어렵다", "텍스트 글자가 너무 작아 약간 키워줘")을 확인해 수정했다.
+  - `src/allocation/yaml_editor.py`의 `paint_gutter`가 숨겨진 블록에서도 `top = bottom`을 대입하고, 한글/영문 줄 높이 차이(`Cascadia Mono` 실측 18px/16px)에도 `round(height)` 누적을 사용해 거터와 본문 줄 위치가 어긋나던 문제를 수정했다. `paint_gutter`, `handle_gutter_click`, `paintEvent` 모두 `blockBoundingGeometry(block).translated(contentOffset())` 좌표를 직접 사용하도록 통일했다.
+  - `YamlCodeEditor`에 `setCenterOnScroll(True)`를 적용하고 `_apply_folding(anchor_line=...)`에서 접기/펼치기·내부 커서 이동 뒤에도 `anchor_line`의 화면 Y 위치가 유지되도록 스크롤을 보정했다. 거터 폴딩 클릭 폭도 22px로 넓혔다.
+  - 코딩 폰트 가독성을 위해 `YAML_FONT_OFFSET = 2`를 적용해 기본 UI 10pt 기준 YAML 편집기 및 Diff 뷰 기본 글자 크기를 **12pt**(상한 28pt, `Ctrl+±/0` 및 `Ctrl+휠` 연동)로 키웠다.
+- `tests/test_yaml_editor_gui.py`에 위쪽 블록을 접은 뒤 하단 블록의 거터 같은 좌표를 실제 `QTest.mouseClick`으로 두 번 눌러 접기·펼치기 및 화면 Y 위치(`delta <= 2.0px`)가 유지됨을 검증하는 `test_gutter_click_fold_unfold_keeps_same_screen_position`과 기본 12pt/글자 크기 변경 연동을 추가했다.
+- 실행한 검증 및 결과(모두 실제 실행):
+  - 글자 크기 변경 후 `tests/test_yaml_editor_gui.py` + `tests/test_gui.py` (`offscreen`): **68개 통과**
+  - 폴딩 수정 후 `QT_QPA_PLATFORM=offscreen .\.venv\Scripts\python.exe -m unittest discover -s tests -q`: **306개 중 300개 통과·6개 skip·실패/오류 0개**
+  - 폴딩 수정 후 PySide6 미설치 모의 discovery (`test_yaml_editor_gui.py`): **2개 통과·7개 skip·오류 0개**
+  - 폴딩 수정 후 Windows 숨김 창 폰트·폴딩 위치 프로브 (`QT_QPA_PLATFORM=windows`): `b85` top `88.0 -> 88.0 -> 88.0` 유지 확인
+  - `git diff --check`: 공백 오류 없음
+- 검증하지 못한 경계: 실제 Windows 화면에서의 실마우스 조작·폰트 가독성, 글자 크기 변경 뒤 나머지 비GUI 단위 테스트 재실행, 배포용 EXE(`build_win.ps1` 미빌드 — 요청 없음).
+- 다음 할 일: 사용자가 실제 GUI(`.\run_gui.ps1`)에서 같은 자리 접기/펼치기와 글자 크기를 확인한 뒤 Git 커밋·푸시·머지 진행.
+
 ## 2026-11-28 — YAML 편집기 탭 및 전용 편집·검증 기능 구현
 
 - 사용자 요청 및 합의에 따라 각 작업모드(`실적작업`·`계획작업`) 좌측 세로 탭에 세 번째 탭 **`YAML 편집`**을 추가했다. 편집 중에는 자동 저장하지 않고 편집기 내부 `Ctrl+S`로 파싱·검증 후 문서·표·원본 파일에 반영하며, 파일 탭·화면·모드·연도·창 이탈 시 저장 여부(`저장`/`버리기`/`취소`)를 묻는다. 주석 보존은 하지 않고 기존 `read_*`/`dump_*` 직렬화 규칙을 유지했다.
