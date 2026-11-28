@@ -2,6 +2,15 @@
 
 이 문서는 세션별 결정·실제 작업·검증·다음 할 일을 이어서 기록한다. 최신 세션을 위에 둔다. 기존 기능별 이력은 `docs/development-log.md`에 남아 있으며 이 문서로 소급해 옮기지 않는다. `완료`는 실제 수행·확인한 작업에만 사용한다.
 
+## 2026-11-28 — 자동 저장·실행 이력·metadata·테마 GitHub 게시 완료
+
+- 사용자 요청에 따라 Terra의 단계별 구현을 코디네이터가 독립 검토·보완시킨 뒤 소스 기능을 승인했다. 입력/계획/결과 자동 저장·복수 파일 복구/외부 변경 보호, 전역 Undo/Redo·다단계 이력, 새 원본/통합 파일, 수동 저장 제거·원본 불변 사본/확정 내보내기, metadata·숫자 입력, 밝은/어두운 테마를 소스에 반영했다.
+- 관련 소스·테스트·문서/검토 이미지 **37개 파일만** `feat/autosave-history-metadata-theme-20261128`에서 **`6e12897d7d68c22dab5d1f38d08a06c47a3a9a06`**으로 커밋·푸시했다. `git diff --cached --check`를 통과했고 스테이징에 `myteam/`·`publish/`가 없음을 검사했다. 미커밋 업무 `myteam/people/people_2026.yaml`과 미추적 `.bak`은 보존했으며 게시하지 않았다.
+- [PR #14](https://github.com/hankjeon/prouman/pull/14)의 CLEAN·MERGEABLE·별도 자동 검사 없음 및 head를 확인하고 검토한 해시를 지정해 merge했다. GitHub의 **MERGED**, 병합 커밋 **`5a1f3a6599a4df7c96afe23943802e8c85cecce3`**을 확인했다. fetch 후 로컬 main을 fast-forward하고 `git diff --exit-code 6e12897 origin/main --`으로 병합 결과가 검토한 내용과 같음을 확인했다.
+- 최종 독립 검증: Windows 11·Python 3.14.7·PySide6 6.12.0, 임시 HEAD fixture의 표준 전체 unittest **297개 중 291개 통과·6개 skip·오류/실패 0개**. 실제 게시 Python 소스/시험 42개는 시험 스냅샷과 지문 일치. Windows 숨김 네이티브 테마 3개, 핵심 수용 6개, 미확정 셀의 종료/모드/연도 경계 3개 통과. CLI 6종 각각 종료 0, Qt 미설치 모의 GUI 발견 73개 skip·오류 없음. worker 보고에만 의존하지 않고 코디네이터가 직접 확인했다.
+- 인계 문서: `docs/handoff-20261128.md`(결과·검토 이미지·노트북 설치/실행·다음 현장 확인), `docs/autosave-history-acceptance.md`(26개 행), `docs/autosave-history-review-20261128.md`(반려/보완/최종 승인). 이 게시 결과 기록과 인계 문서의 PR/병합 정보는 별도 후속 문서 커밋으로 남긴다.
+- **EXE는 빌드하지 않았다.** 노트북에서는 최신 main과 `requirements-gui.txt`로 소스 GUI를 실행한다. 현재 PC의 미커밋 업무 YAML/백업은 노트북으로 자동 전송되지 않는다. Linux, 실제 OS 고대비/테마 전환·실마우스/IME/물리 DPI·물리 디스크 장애/전원 중단은 다음 현장 확인이다. 지문 검사와 교체 사이 경쟁을 OS 잠금으로 없애지 않으며, 이 경계를 전체 검증 완료로 표현하지 않는다.
+
 ## 2026-11-28 — 최종 소스 독립 검토 승인·GitHub 게시 준비
 
 - 마지막 검토 보완이 적용된 Python 소스/시험 42개를 독립 최종 스냅샷과 SHA-256으로 비교해 차이 없음을 확인했다. Windows 11·Python 3.14.7·PySide6 6.12.0, Qt offscreen의 **표준 전체 회귀 297개 중 291개 통과·6개 skip·오류/실패 0개**(약 38.5초). 스냅샷은 `C:\Users\hankj\AppData\Local\Temp\opencode\prouman-review-snapshot-wbvcy_jy`이며 지문·표준 로그·수용 점검 JSON을 남겼다. PowerShell helper는 UTF-8 출력/디코딩 계약을 맞춘 것이며 제품 venv.ps1은 변경하지 않았다.
