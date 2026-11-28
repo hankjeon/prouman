@@ -23,7 +23,9 @@ PWSH = pwsh_binary()
 @unittest.skipUnless(PWSH, 'pwsh/powershell이 없어 venv.ps1 테스트를 건너뜁니다.')
 class VenvPs1ScriptTests(unittest.TestCase):
     def run_pwsh(self, command, input=None, timeout=30):
-        return subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-Command', command],
+        utf8_command = ('[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+                        '$OutputEncoding = [Console]::OutputEncoding; ' + command)
+        return subprocess.run([PWSH, '-NoProfile', '-NonInteractive', '-Command', utf8_command],
                               text=True, encoding='utf-8', capture_output=True, timeout=timeout, input=input)
 
     def test_syntax_is_valid(self):

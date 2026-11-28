@@ -203,6 +203,21 @@ class WorkflowModelTests(unittest.TestCase):
 
 
 class BundleTests(unittest.TestCase):
+    def test_external_conflict_aborts_entire_bundle_before_backup(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / 'one.yaml', Path(directory) / 'two.yaml'
+            first.write_bytes(b'one')
+            second.write_bytes(b'two')
+            expected = {first.resolve(): hashlib.sha256(b'one').digest(),
+                        second.resolve(): hashlib.sha256(b'two').digest()}
+            second.write_bytes(b'external')
+            with self.assertRaisesRegex(OSError, '외부 변경 충돌'):
+                write_bundle([(first, b'new one'), (second, b'new two')], set(), expected=expected)
+            self.assertEqual(first.read_bytes(), b'one')
+            self.assertEqual(second.read_bytes(), b'external')
+            self.assertFalse(first.with_name('one.yaml.bak').exists())
+
     def test_NP17_staging_failure_does_not_touch_either_original(self):
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / 'projects.yaml'
@@ -300,10 +315,15 @@ class WorkflowGuiTests(unittest.TestCase):
         self.window = MainWindow(self.settings)
         self.addCleanup(self.window.deleteLater)
         self.warnings = []
+        self.source_counter = 0
         for workspace in self.window.workspaces:
             workspace.warn = lambda title, text: self.warnings.append((title, text))
             workspace.confirm = lambda *_: True
             workspace.ask_export = lambda *_: 'discard'
+            def choose_temp(kind, year, sources):
+                self.source_counter += 1
+                return str(self.path / f'auto_{kind}_{year}_{self.source_counter}.yaml')
+            workspace.choose_source_path = choose_temp
 
     def prepare(self):
         workspace = self.window.plan
@@ -320,7 +340,7 @@ class WorkflowGuiTests(unittest.TestCase):
         self.assertEqual(window.actual.pages.tabPosition(), QTabWidget.West)
         menus = {a.text(): a.menu() for a in window.menuBar().actions()}
         self.assertEqual([a.text() for a in menus['파일'].actions()],
-                         ['새로 만들기', '불러오기', '저장', '실적 파일에서 계획 준비', '내보내기', '종료'])
+                         ['새로 만들기', '불러오기', '저장 위치 지정', '실적 파일에서 계획 준비', '내보내기', '종료'])
         self.assertEqual([a.text() for a in menus['보기'].actions()], ['글자 크게', '글자 작게', '기본 크기'])
         plan = self.prepare()
         self.assertEqual(window.actual.project_editor.projects, [])
@@ -347,12 +367,11 @@ class WorkflowGuiTests(unittest.TestCase):
         actions = {a.text(): a for a in window.menuBar().actions()[0].menu().actions()}
         self.assertTrue(actions['실적 파일에서 계획 준비'].isEnabled())
         actions['실적 파일에서 계획 준비'].trigger()
-        actions['저장'].trigger()
         actions['내보내기'].trigger()
         window.mode_combo.setCurrentIndex(window.ACTUAL)
         self.assertFalse(actions['실적 파일에서 계획 준비'].isEnabled())
-        actions['저장'].trigger()
-        self.assertEqual(calls, ['prepare-plan', 'save-plan', 'export-plan', 'export-actual'])
+        actions['내보내기'].trigger()
+        self.assertEqual(calls, ['prepare-plan', 'export-plan', 'export-actual'])
         self.assertEqual(window.actual.pages.currentIndex(), 0)
         window.actual.pages.setCurrentIndex(1)
         self.assertTrue(window.actual.issue_view.model().rowCount())
@@ -388,7 +407,7 @@ class WorkflowGuiTests(unittest.TestCase):
         work, output = self.path / 'work', self.path / 'output'
         self.assertTrue(workspace.save_plan(work))
         original = (work / 'plans/plan_2027.yaml').read_bytes()
-        self.assertFalse(workspace.confirm_plan(work))
+        self.assertTrue(workspace.confirm_plan(work))  # 작업자료 사본은 열린 원본이 아니다.
         self.assertTrue(workspace.confirm_plan(output), self.warnings)
         self.assertEqual((work / 'plans/plan_2027.yaml').read_bytes(), original)
         data = yaml.safe_load((output / 'people/people_2027.yaml').read_text(encoding='utf-8'))
@@ -424,6 +443,7 @@ class WorkflowGuiTests(unittest.TestCase):
 
     def test_NP01_restore_modes_independently_and_close_checks_both(self):
         workspace = self.prepare()
+        self.assertTrue(workspace.browse_bind_sources())
         self.assertTrue(workspace.save_plan(self.path / 'plan'))
         self.window.set_mode(self.window.PLANNING)
         restored = MainWindow(self.settings)
@@ -438,20 +458,21 @@ class WorkflowGuiTests(unittest.TestCase):
         self.window.plan.keep_all = lambda *_: True
         self.assertTrue(self.window.close())
 
-    def test_NP14_save_as_replaces_restored_source_paths(self):
+    def test_NP14_copy_keeps_restored_source_paths(self):
         workspace = self.prepare()
+        self.assertTrue(workspace.browse_bind_sources())
+        original_sources = list(workspace.loaded_files)
         first, second = self.path / 'first', self.path / 'second'
         self.assertTrue(workspace.save_plan(first))
         self.assertTrue(workspace.save_plan(second))
-        self.assertEqual(set(workspace.loaded_files),
-                         {str(second / 'projects.yaml'), str(second / 'plans/plan_2027.yaml')})
+        self.assertEqual(workspace.loaded_files, original_sources)
         warnings = []
         with patch('allocation.gui.WorkspaceWindow.warn', side_effect=lambda *args: warnings.append(args)):
             reopened = MainWindow(self.settings)
         self.addCleanup(reopened.deleteLater)
         self.assertEqual(warnings, [])
         self.assertEqual(len(reopened.plan.planning_page.doc.people), 1)
-        self.assertEqual(reopened.plan.projects_sources, [str(second / 'projects.yaml')])
+        self.assertEqual(reopened.plan.plan_sources['2027'], original_sources[0])
 
     def test_NP17_previous_settings_split_and_legacy_notice(self):
         project_path, legacy_path = self.path / 'projects.yaml', self.path / 'legacy.yaml'

@@ -645,8 +645,11 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual((again, dropped), ([ProjectEntry('연구: "1차" #A', 'A1', '2026.1.1.', '2026-12-31',
                                                           [YearEntry('2026', '1.5', '4, 5, 6')])], []))
         doc = PeopleDoc('2026', [PersonEntry('김 철수', {'A1': '1', 'B': ''})])
-        self.assertNotIn('"B"', dump_people(doc))
-        self.assertEqual(read_people(dump_people(doc))[0].people[0].allocations, {'A1': '1'})
+        self.assertEqual(read_people(dump_people(doc))[0].people[0].allocations, {'A1': '1', 'B': ''})
+        _, invalid_issues = load_inputs('p.yaml', 'h.yaml', {'projects': text, 'people': dump_people(doc)})
+        self.assertIn('E005', [i.code for i in invalid_issues])
+        # 명시적 행 삭제는 빈 값 저장과 구분한다.
+        doc.people[0].allocations.pop('B')
         inputs, issues = load_inputs('p.yaml', 'h.yaml', {'projects': text, 'people': dump_people(doc)})
         self.assertIsNotNone(inputs, issues)
         self.assertEqual(inputs.projects['A1'].yearly[2026].excluded, frozenset({4, 5, 6}))

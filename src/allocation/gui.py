@@ -2,20 +2,24 @@
 import os
 import json
 import sys
+import hashlib
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, QSize, Qt, Signal,
+from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, QSize, Qt, Signal, QTimer,
                             qInstallMessageHandler)
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog,
                                QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton,
+                               QLineEdit, QPlainTextEdit, QTextEdit,
                                QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
                                QTableView, QTabWidget, QToolTip, QVBoxLayout, QWidget)
 
 from . import theme
-from .document import (DocumentError, PeopleDoc, PlanDoc, detect_kind, dump_people, dump_plan, dump_projects,
+from .autosave import TransactionalSession
+from .global_history import GlobalHistory
+from .document import (DocumentError, PeopleDoc, PlanDoc, ProjectList, detect_kind, dump_people, dump_plan, dump_projects,
                        plan_from_people, read_people, read_plan, read_projects, valid_year)
 from .editor import PeopleEditor, PinListDelegate, ProjectEditor, SelectionDelegate
 from .engine import calculate
@@ -32,6 +36,12 @@ from .table_order import TableOrderMixin, selection_text
 
 YAML_FILTER = 'YAML 파일 (*.yaml *.yml);;모든 파일 (*)'
 KINDS = {'projects': '사업', 'people': '사람'}
+
+
+class AutosaveEncodingError(ValueError):
+    def __init__(self, path, encoding):
+        self.path, self.encoding = path, encoding
+        super().__init__(f'{path}: {ENCODINGS[encoding]}로 표현할 수 없는 문자가 있습니다.')
 
 
 def severity_colors():
@@ -107,7 +117,7 @@ class PinTableDelegate(SelectionDelegate):
         QStyledItemDelegate.paint(self, painter, text_option, index)
         self.selected = False
         theme.draw_pin_icon(painter, theme.pin_icon_rect(option.rect), state,
-                            selected=bool(opt_state & QStyle.StateFlag.State_Selected))
+                            selected=bool(opt_state & QStyle.StateFlag.State_Selected), state_colors=True)
         if opt_state & QStyle.StateFlag.State_HasFocus:
             painter.save()
             painter.setPen(theme.current_cell_color())
@@ -303,6 +313,8 @@ class WorkspaceWindow(QMainWindow):
     INPUT_PAGE, RESULT_PAGE = 0, 1
     PROJECTS_TAB, PEOPLE_TAB, OVERVIEW_TAB = 0, 1, 2  # input_tabs
     ISSUES_TAB, SUMMARY_TAB = 0, 1  # result_tabs
+    history_committed = Signal(object, str, object, object)
+    history_invalidated = Signal()
 
     def __init__(self, settings=None, planning=False):
         super().__init__()
@@ -326,6 +338,22 @@ class WorkspaceWindow(QMainWindow):
         self.backed_up = set()  # 이번 실행에서 .bak을 만든 파일. 첫 내보내기 직전의 원본만 백업한다.
         self.document_encodings = {}  # 문서 종류:연도 -> 병합한 원본 인코딩 집합
         self.file_encodings = {}  # 절대 경로 -> (인코딩, 판별 안내)
+        self.file_fingerprints = {}  # 읽거나 성공적으로 쓴 원본의 내용 지문
+        self._source_metadata = {}  # 원본 경로별 파일 공통 metadata
+        self._autosave = None
+        self._autosave_pending = False
+        self._autosave_restoring = False
+        self._autosave_blocked = False
+        self._autosave_selection = None
+        self._autosave_touched_projects = False
+        self._autosave_touched_years = set()
+        self._binding_deferred_projects = False
+        self._binding_deferred_years = set()
+        self._history_action = None
+        self._history_before = None
+        self._copy_backed_up = set()
+        self._import_depth = 0
+        self._unsupported_sources = set()
         try:
             choices = json.loads(self.settings.value('read_encodings', '{}'))
             self.read_encodings = {key: value for key, value in choices.items()
@@ -339,6 +367,8 @@ class WorkspaceWindow(QMainWindow):
         # 입력 화면: 열린 문서 목록, 사업·사람 입력 탭 (파일 명령은 메뉴가 맡는다)
         self.projects_label = QLabel()
         self.encoding_label = QLabel()
+        self.save_status_label = QLabel('저장 위치 필요')
+        self.statusBar().addPermanentWidget(self.save_status_label)
         self.statusBar().addPermanentWidget(self.encoding_label)
         files_row = QHBoxLayout()
         files_row.addStretch()
@@ -360,15 +390,18 @@ class WorkspaceWindow(QMainWindow):
         self.people_editor = PeopleEditor(lambda: self.project_editor.projects)
         self.planning_page = PlanningPage(lambda: self.project_editor.projects)
         self.planning_page.changed.connect(self.plan_changed)
-        self.planning_page.save_requested.connect(self.browse_save_plan)
+        self.planning_page.before_change.connect(self._capture_autosave_selection)
+        self.planning_page.save_requested.connect(self.browse_work_copy)
         self.planning_page.confirm_requested.connect(self.browse_confirm_plan)
         self.project_editor.managed_year = lambda: self.people_editor.doc.year
         self.people_editor.year_changed.connect(self.project_editor.refresh_grid)
         self.project_editor.allow_remove = self.allow_remove_project
         self.project_editor.changed.connect(self.projects_changed)
+        self.project_editor.before_change.connect(self._capture_autosave_selection)
         self.project_editor.alias_renamed.connect(self.alias_renamed)
         self.project_editor.alias_removed.connect(self.remove_alias_everywhere)
         self.people_editor.changed.connect(self.people_changed)
+        self.people_editor.before_change.connect(self._capture_autosave_selection)
         self.people_editor.overview.projects_order_requested.connect(self.project_editor.reorder_projects)
         self.input_tabs = QTabWidget()
         self.input_tabs.addTab(self.project_editor, '사업 입력')
@@ -461,9 +494,10 @@ class WorkspaceWindow(QMainWindow):
         self.setCentralWidget(central)
 
         file_menu = self.menuBar().addMenu('파일')
-        for text, shortcut, slot in (('새로 만들기', QKeySequence.New, self.new_all),
+        for text, shortcut, slot in (('새로 만들기', QKeySequence.New, self.browse_new),
                                     ('불러오기', QKeySequence.Open, self.browse_import),
-                                    ('내보내기', QKeySequence.Save, self.browse_export),
+                                    ('저장 위치 지정', None, self.browse_bind_sources),
+                                    ('내보내기', None, self.browse_export),
                                     ('종료', QKeySequence.Quit, self.close)):
             action = QAction(text, self)
             if shortcut is not None:
@@ -483,6 +517,8 @@ class WorkspaceWindow(QMainWindow):
         self.show_result_header()
 
         self.restore_or_default()
+        self.apply_theme_styles()
+        QApplication.instance().paletteChanged.connect(self.apply_theme_styles)
 
     # --- 공통 대화상자 (테스트에서 바꿔 끼운다) ---
 
@@ -533,6 +569,12 @@ class WorkspaceWindow(QMainWindow):
 
     def show_page(self, page):
         """결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
+        if page == self.RESULT_PAGE:
+            focus = QApplication.focusWidget()
+            if focus is not None and self.isAncestorOf(focus):
+                focus.clearFocus()
+            if not self.flush_autosave():
+                return
         if page == self.RESULT_PAGE and not self.planning:
             self.generate()
             return
@@ -554,6 +596,16 @@ class WorkspaceWindow(QMainWindow):
 
     def apply_theme_styles(self):
         """시스템 테마가 바뀌면 메뉴·결과 표 색을 다시 칠한다."""
+        if getattr(self, '_theme_applying', False):
+            return
+        self._theme_applying = True
+        try:
+            theme.apply_window_theme(self)
+            self._refresh_theme_widgets()
+        finally:
+            self._theme_applying = False
+
+    def _refresh_theme_widgets(self):
         self.project_editor.apply_theme()
         self.people_editor.apply_theme()
         self.planning_page.refresh_review()
@@ -581,13 +633,392 @@ class WorkspaceWindow(QMainWindow):
             self.people_dirty[year] = dirty
         self.refresh_marks()
 
+    def set_save_status(self, state, detail=''):
+        self.save_status_label.setText(state)
+        paths = self.projects_sources + [p for sources in self.people_sources.values() for p in sources]
+        paths += [p for p in self.plan_sources.values() if p]
+        self.save_status_label.setToolTip('\n'.join(paths) + (('\n' + detail) if detail else ''))
+
+    def update_save_status(self, *, reset=False):
+        if (not reset and self.save_status_label.text() in
+                ('저장 실패', '외부 변경 충돌', '복구 필요')):
+            return
+        dirty = self.plan_dirty if self.planning else self.people_dirty
+        sources = self.plan_sources if self.planning else self.people_sources
+        missing = self.projects_dirty and len(self.projects_sources) != 1
+        missing |= any(value and (not sources.get(y) or (not self.planning and len(sources[y]) != 1))
+                       for y, value in dirty.items())
+        if self.current_year in self.people_docs:
+            current = sources.get(self.current_year)
+            missing |= not current or (not self.planning and len(current) != 1)
+        if self._autosave_blocked:
+            self.set_save_status('복구 필요')
+        elif missing or not self.loaded_files:
+            self.set_save_status('저장 위치 필요')
+        else:
+            self.set_save_status('저장됨')
+
+    def save_failure_status(self, exc):
+        message = str(exc)
+        state = ('복구 필요' if '원본 복구 실패' in message else
+                 '외부 변경 충돌' if '외부 변경' in message or '외부에서 변경' in message else '저장 실패')
+        self.set_save_status(state, message)
+
+    def _business_snapshot(self):
+        return (self.project_editor.projects, self.people_docs, self.plan_docs)
+
+    @property
+    def autosave_session(self):
+        return self._autosave
+
+    def history_ready(self):
+        if self._autosave is None or self._autosave_blocked:
+            return False
+        dirty = self.plan_dirty if self.planning else self.people_dirty
+        return (not (self._autosave_paths & self._unsupported_sources)
+                and not (self._autosave_project is not None and self.projects_dirty)
+                and not any(dirty.get(year) for year in self._autosave_people))
+
+    def block_history_writes(self):
+        self._autosave_blocked = True
+
+    def restore_history_state(self, context=None):
+        """성공한 이력 이동을 화면과 저장 지문에 반영한다."""
+        self._autosave_selection = None
+        self._restore_autosave(self._autosave.state, True, set(self._autosave_people))
+        for path, fingerprint in self._autosave.fingerprints.items():
+            self.file_fingerprints[str(path)] = fingerprint
+        self.backed_up.update(self._autosave.backed_up)
+        self.update_save_status(reset=True)
+        if context is None:
+            return
+        year, page, tab, alias, name, result_tab = context
+        self._autosave_restoring = True
+        try:
+            if year in self.people_docs:
+                self.select_year(year)
+            if 0 <= tab < self.input_tabs.count():
+                self.input_tabs.setCurrentIndex(tab)
+            row = next((i for i, p in enumerate(self.project_editor.projects) if p.alias == alias), -1)
+            if row >= 0:
+                self.project_editor.table.setCurrentCell(row, 0)
+            doc = self.plan_docs[self.current_year] if self.planning else self.people_docs[self.current_year]
+            row = next((i for i, person in enumerate(doc.people) if person.name == name), -1)
+            people_list = self.planning_page.people_list if self.planning else self.people_editor.people_list
+            if row >= 0:
+                people_list.setCurrentRow(row)
+            self.show_page(page)
+            if not self.planning and page == self.RESULT_PAGE:
+                self.result_tabs.setCurrentIndex(result_tab)
+                matches = self.person_list.findItems(name or '', Qt.MatchExactly)
+                if matches:
+                    self.person_list.setCurrentItem(matches[0])
+        finally:
+            self._autosave_restoring = False
+
+    def history_context(self):
+        project = self.project_editor.current()
+        person = self.planning_page.current() if self.planning else self.people_editor.current()
+        name = person.name if person else None
+        if not self.planning and self.pages.currentIndex() == self.RESULT_PAGE and self._shown_person:
+            name = self._shown_person
+        return (self.current_year, self.pages.currentIndex(), self.input_tabs.currentIndex(),
+                project.alias if project else None, name,
+                self.result_tabs.currentIndex())
+
+    def history_label(self, before, after):
+        mode = '계획' if self.planning else '실적'
+        if self._history_action:
+            return f'{mode}·{self._history_action}'
+        old_projects, old_people, old_plans = before
+        new_projects, new_people, new_plans = after
+        if dump_projects(old_projects) != dump_projects(new_projects):
+            a, b = [p.alias for p in old_projects], [p.alias for p in new_projects]
+            if sorted(a) == sorted(b) and a != b:
+                kind = '순서 변경'
+            elif len(a) == len(b) and a != b:
+                kind = '약칭 변경'
+            elif len(a) == len(b) and any(x.years != y.years for x, y in zip(old_projects, new_projects)):
+                kind = '사업 배정 수정'
+            else:
+                kind = '사업 수정'
+            return f'{mode}·사업 입력 — {kind}'
+        year = self.current_year
+        if self.planning:
+            old = old_plans.get(year)
+            new = new_plans.get(year)
+            if self.pages.currentIndex() == self.RESULT_PAGE:
+                kind = '재계산' if self.planning_page.last_generation is not None else '할당 수정'
+                return f'{mode}·결과 — {kind}'
+            if old and new and len(old.people) == len(new.people):
+                if any(a.draft != b.draft for a, b in zip(old.people, new.people)):
+                    return f'{mode}·사람 입력 — 참고 점수 수정'
+                if any(a.priorities != b.priorities for a, b in zip(old.people, new.people)):
+                    return f'{mode}·사람 입력 — 순위 수정'
+            return f'{mode}·사람 입력 — 사람 수정'
+        old, new = old_people.get(year), new_people.get(year)
+        if old and new and [p.name for p in old.people] != [p.name for p in new.people]:
+            if sorted(p.name for p in old.people) == sorted(p.name for p in new.people):
+                where = '종합' if self.input_tabs.currentIndex() == self.OVERVIEW_TAB else '사람 입력'
+                return f'{mode}·{where} — 사람 순서 변경'
+            return f'{mode}·사람 입력 — ' + ('사람 이름 수정' if len(old.people) == len(new.people) else '사람 수정')
+        if old and new and len(old.people) == len(new.people):
+            kinds = set()
+            for a, b in zip(old.people, new.people):
+                if a.allocations != b.allocations:
+                    kinds.add('참여율 수정')
+                if a.absences != b.absences:
+                    kinds.add('공백 기간 수정')
+                if a.fixed != b.fixed:
+                    kinds.add('월별 고정')
+                if a.metadata != b.metadata:
+                    kinds.add('추가정보 수정')
+            if kinds:
+                return f'{mode}·사람 입력 — ' + (next(iter(kinds)) if len(kinds) == 1 else '여러 항목 수정')
+        return f'{mode}·사람 입력 — 참여율 수정'
+
+    def _bind_autosave(self):
+        """불러오기 경계에서만 단일 원본을 묶는다. 가져오기 자체는 저장하지 않는다."""
+        self.history_invalidated.emit()
+        self._autosave = None
+        self._autosave_selection = None
+        self._autosave_touched_projects = False
+        self._autosave_touched_years.clear()
+        if self.planning:
+            people_paths = {year: Path(path).resolve() for year, path in self.plan_sources.items() if path}
+        else:
+            people_paths = {year: Path(paths[0]).resolve() for year, paths in self.people_sources.items() if len(paths) == 1}
+        project_path = Path(self.projects_sources[0]).resolve() if len(self.projects_sources) == 1 else None
+        if not people_paths and project_path is None:
+            return
+        paths = ([project_path] if project_path else []) + list(people_paths.values())
+        if len(set(paths)) != len(paths):
+            self.warn('자동 저장 차단', '같은 파일이 여러 문서의 원본으로 열렸습니다.')
+            return
+        try:
+            for path in paths:
+                expected = self.file_fingerprints.get(str(path))
+                if expected is None or hashlib.sha256(path.read_bytes()).digest() != expected:
+                    raise ValueError(f'불러온 뒤 외부에서 변경된 파일: {path}')
+            encodings = {path: self.file_encodings[str(path)][0] for path in paths}
+
+            def serialize(snapshot):
+                projects, people, plans = snapshot
+                texts = {project_path: dump_projects(projects)} if project_path else {}
+                docs, dump = (plans, dump_plan) if self.planning else (people, dump_people)
+                texts.update({path: dump(docs[year]) for year, path in people_paths.items()})
+                result = {}
+                for path, text in texts.items():
+                    try:
+                        result[path] = encode_yaml(text, encodings[path])
+                    except UnicodeEncodeError as exc:
+                        raise AutosaveEncodingError(path, encodings[path]) from exc
+                return result
+
+            session = TransactionalSession(self._business_snapshot(), serialize, backed_up=self.backed_up)
+            if any(session.fingerprints[path] != self.file_fingerprints[str(path)] for path in paths):
+                raise ValueError('불러오는 동안 원본이 외부에서 변경되었습니다.')
+            self._autosave = session
+            self._autosave_people = people_paths
+            self._autosave_project = project_path
+            self._autosave_paths = set(paths)
+            self._autosave_encodings = encodings
+            self._autosave_blocked = False
+            self.update_save_status(reset=True)
+        except (OSError, UnicodeError, ValueError, KeyError) as exc:
+            self.save_failure_status(exc)
+            self.warn('자동 저장 차단', str(exc))
+
+    def _schedule_autosave(self):
+        if self._autosave_restoring or self._import_depth or self._autosave_blocked:
+            return
+        if not self._autosave_pending:
+            self.set_save_status('저장 중')
+            self._capture_autosave_selection()
+            self._autosave_pending = True
+            QTimer.singleShot(0, self.flush_autosave)
+
+    def _capture_autosave_selection(self):
+        if (self._autosave is None or self._autosave_pending or self._autosave_selection is not None
+                or self._import_depth or self._autosave_restoring):
+            return
+        project = self.project_editor.current()
+        person = self.planning_page.current() if self.planning else self.people_editor.current()
+        self._autosave_selection = (self.current_year,
+                                    project.alias if project is not None else None,
+                                    person.name if person is not None else None,
+                                    self.project_editor.table.currentColumn(),
+                                    self.planning_page.matrix.currentRow(),
+                                    self.planning_page.matrix.currentColumn())
+        self._history_before = self.history_context()
+
+    def flush_autosave(self):
+        if not self._autosave_pending:
+            return not self._autosave_blocked
+        self._autosave_pending = False
+        if self._autosave_blocked:
+            return False
+        if ((self._autosave_touched_projects and self._binding_deferred_projects)
+                or self._autosave_touched_years & self._binding_deferred_years):
+            self._autosave_touched_projects |= self._binding_deferred_projects
+            self._autosave_touched_years.update(self._binding_deferred_years)
+        unbound_project = self._autosave_touched_projects and (not self._autosave or self._autosave_project is None)
+        unbound_years = {year for year in self._autosave_touched_years
+                         if not self._autosave or year not in self._autosave_people}
+        if unbound_project or unbound_years:
+            return self._save_new_bindings(unbound_project, unbound_years)
+        if not self._autosave:
+            return False
+        old = self._autosave.state
+        current = self._business_snapshot()
+        projects_changed, people_changed = True, set(self._autosave_people)
+        try:
+            projects_changed = (self._autosave_project is not None
+                                and dump_projects(old[0]) != dump_projects(current[0]))
+            index, dump = (2, dump_plan) if self.planning else (1, dump_people)
+            people_changed = {y for y in self._autosave_people
+                              if y in current[index] and dump(old[index][y]) != dump(current[index][y])}
+            unsafe = self._autosave_paths & self._unsupported_sources
+            if unsafe:
+                raise ValueError('지원하지 않는 항목을 metadata로 옮긴 뒤 다시 불러오세요: ' + ', '.join(map(str, unsafe)))
+            # 저장 위치가 없는 별도 문서는 이 작업과 무관하면 메모리에 유지한다.
+            candidate = list(deepcopy(current))
+            if self._autosave_project is None:
+                candidate[0] = deepcopy(old[0])
+            if (not self.planning and self.current_year in self._autosave_people
+                    and current[1][self.current_year].year != self.current_year):
+                year = self.current_year
+                if [p.alias for p in old[0]] != [p.alias for p in current[0]]:
+                    raise ValueError('연도 변경 중 약칭 변경을 저장하려면 먼저 새 연도의 저장 위치를 지정하세요.')
+                candidate[index][year] = deepcopy(old[index][year])
+                people_changed.discard(year)
+            for year in (set(candidate[index]) | set(old[index])) - set(self._autosave_people):
+                if year in old[index]:
+                    candidate[index][year] = deepcopy(old[index][year])
+                else:
+                    candidate[index].pop(year, None)
+            other, other_dump = (1, dump_people) if self.planning else (2, dump_plan)
+            candidate[other] = deepcopy(old[other])
+            changed_encodings = {}
+            label = self.history_label(old, current)
+            did_commit = False
+            try:
+                while True:
+                    try:
+                        did_commit = self._autosave.commit(label, tuple(candidate))
+                        break
+                    except AutosaveEncodingError as exc:
+                        if not self.confirm('UTF-8로 저장할까요?',
+                                            f'{exc}\n이 파일을 UTF-8로 바꿔 저장할까요?'):
+                            raise
+                        changed_encodings[exc.path] = self._autosave_encodings[exc.path]
+                        self._autosave_encodings[exc.path] = 'utf-8'
+            except Exception:
+                self._autosave_encodings.update(changed_encodings)
+                raise
+        except (OSError, UnicodeError, ValueError, TypeError, DocumentError) as exc:
+            self._restore_autosave(old, projects_changed or self._autosave_touched_projects,
+                                   people_changed | self._autosave_touched_years)
+            self._autosave_touched_projects = False
+            self._autosave_touched_years.clear()
+            self._history_before = None
+            if '원본 복구 실패' in str(exc):
+                self._autosave_blocked = True
+            self.save_failure_status(exc)
+            self.warn('자동 저장 실패', str(exc))
+            return False
+        for path, fingerprint in self._autosave.fingerprints.items():
+            self.file_fingerprints[str(path)] = fingerprint
+            self.file_encodings[str(path)] = (self._autosave_encodings[path], '저장 인코딩')
+            self.read_encodings[str(path)] = self._autosave_encodings[path]
+        if self._autosave_project:
+            self.document_encodings['projects'] = {self._autosave_encodings[self._autosave_project]}
+        prefix = 'plan:' if self.planning else 'people:'
+        for year, path in self._autosave_people.items():
+            self.document_encodings[prefix + year] = {self._autosave_encodings[path]}
+        self.persist_read_encodings()
+        self.refresh_encoding_label()
+        self.backed_up.update(self._autosave.backed_up)
+        if did_commit:
+            self.history_committed.emit(self._autosave, label,
+                                        self._history_before or self.history_context(), self.history_context())
+        self._history_before = None
+        self._autosave_selection = None
+        if projects_changed or self._autosave_touched_projects:
+            self.projects_dirty = False
+        dirty = self.plan_dirty if self.planning else self.people_dirty
+        for year in (people_changed | self._autosave_touched_years) & set(self._autosave_people):
+            dirty[year] = False
+        self._autosave_touched_projects = False
+        self._autosave_touched_years.clear()
+        self.refresh_marks()
+        self.update_save_status(reset=True)
+        self.statusBar().showMessage('원본 자동 저장됨')
+        return True
+
+    def _restore_autosave(self, snapshot, projects_changed, people_changed):
+        project_row = self.project_editor.table.currentRow()
+        person_list = self.planning_page.people_list if self.planning else self.people_editor.people_list
+        person_row = person_list.currentRow()
+        selection = self._autosave_selection
+        self._autosave_selection = None
+        self._autosave_restoring = True
+        try:
+            projects, old_people, old_plans = snapshot
+            if self._autosave_project is None:
+                projects = self.project_editor.projects
+            if self.planning:
+                old_people = self.people_docs
+                old_plans.update({y: d for y, d in self.plan_docs.items() if y not in self._autosave_people})
+            else:
+                old_plans = self.plan_docs
+                old_people.update({y: d for y, d in self.people_docs.items() if y not in self._autosave_people})
+            self.people_docs, self.plan_docs = old_people, old_plans
+            self.project_editor.set_projects(projects)
+            if selection and selection[0] in self.people_docs:
+                self.current_year = selection[0]
+            if self.current_year in self.people_docs:
+                self.select_year(self.current_year)
+            if selection:
+                project_row = next((i for i, p in enumerate(projects) if p.alias == selection[1]), project_row)
+                doc = self.plan_docs[self.current_year] if self.planning else self.people_editor.doc
+                person_row = next((i for i, p in enumerate(doc.people)
+                                   if p.name == selection[2]), person_row)
+            if self.project_editor.projects and project_row >= 0:
+                column = max(0, selection[3]) if selection else 0
+                self.project_editor.table.setCurrentCell(min(project_row, len(self.project_editor.projects) - 1), column)
+            doc = self.plan_docs[self.current_year] if self.planning else self.people_editor.doc
+            if doc.people and person_row >= 0:
+                person_list.setCurrentRow(min(person_row, len(doc.people) - 1))
+            if self.planning and selection and selection[4] >= 0 and selection[5] >= 0:
+                self.planning_page.matrix.setCurrentCell(selection[4], selection[5])
+            if projects_changed:
+                self.projects_dirty = False
+            dirty = self.plan_dirty if self.planning else self.people_dirty
+            for year in people_changed & set(self._autosave_people):
+                dirty[year] = False
+            self.refresh_marks()
+        finally:
+            self._autosave_restoring = False
+
     def people_changed(self):
         self.set_people_dirty(self.current_year, True)
+        self._autosave_touched_years.add(self.current_year)
+        if self.current_year in self.people_docs and self.people_docs[self.current_year].year != self.current_year:
+            # 연도 재바인딩은 별도 작업이다. 타이핑 중 원본 연도를 덮어쓰지 않는다.
+            self._autosave_pending = False
+            self._autosave_touched_years.discard(self.current_year)
+            self.statusBar().showMessage('연도 변경은 저장 위치 확인이 필요합니다.')
+            self.set_save_status('저장 위치 필요')
+            return
+        self._schedule_autosave()
 
     def plan_changed(self):
         if self.current_year in self.plan_dirty:
             self.plan_dirty[self.current_year] = True
+        self._autosave_touched_years.add(self.current_year)
         self.refresh_marks()
+        self._schedule_autosave()
 
     def refresh_marks(self):
         """탭·메뉴·연도 목록·사업 줄에 미내보내기 표시(*)를 다시 그린다."""
@@ -637,6 +1068,172 @@ class WorkspaceWindow(QMainWindow):
         self.file_encodings[path] = (decoded.encoding, decoded.note)
         self.document_encodings.setdefault(key, set()).add(decoded.encoding)
 
+    def merged_metadata(self, paths, incoming_path, incoming_metadata):
+        """파일별 metadata를 별도 항목으로 보존하여 중복 키도 잃지 않는다."""
+        return {'prouman_source_metadata': [
+            {'source': str(Path(path).resolve()),
+             'metadata': deepcopy(incoming_metadata if str(Path(path).resolve()) == incoming_path
+                                  else self._source_metadata.get(str(Path(path).resolve())))}
+            for path in paths]}
+
+    def choose_source_path(self, kind, year, sources):
+        """새 원본 또는 통합 원본의 경로를 사용자가 직접 선택한다."""
+        title = '사업 저장 위치' if kind == 'projects' else f'{year}년 {"계획" if self.planning else "사람"} 저장 위치'
+        if len(sources) > 1 and not self.confirm(
+                '통합 파일 만들기',
+                '새 통합 파일을 만들고 기존 원본을 유지합니다. 파일 공통 metadata는 원본별 항목으로 보존됩니다. 계속할까요?'):
+            return ''
+        path, _ = QFileDialog.getSaveFileName(self, title, self.start_folder('export') or '.', YAML_FILTER)
+        return path
+
+    def browse_bind_sources(self):
+        """경로 선택 취소 후에도 작업 자료의 저장 위치를 다시 지정할 수 있다."""
+        if not self.planning and self.people_editor.doc.year.strip() != self.current_year:
+            return self.flush_year_edit()
+        project = self.projects_dirty and (not self._autosave or self._autosave_project is None)
+        dirty = self.plan_dirty if self.planning else self.people_dirty
+        years = {y for y, value in dirty.items() if value and (not self._autosave or y not in self._autosave_people)}
+        if not project and not years:
+            self.statusBar().showMessage('저장 위치가 필요한 작업 문서가 없습니다.')
+            return False
+        return self._save_new_bindings(project, years)
+
+    def _save_new_bindings(self, unbound_project, unbound_years):
+        """경로 선정부터 전체 묶음 교체 성공까지 기존 바인딩과 이력을 유지한다."""
+        self._autosave_pending = False
+        selected = []
+        success = False
+        touched_projects = self._autosave_touched_projects
+        touched_years = set(self._autosave_touched_years)
+        try:
+            requests = ([('projects', None, list(self.projects_sources))] if unbound_project else [])
+            for year in sorted(unbound_years):
+                sources = ([self.plan_sources[year]] if self.planning and self.plan_sources.get(year)
+                           else ([] if self.planning else list(self.people_sources.get(year, []))))
+                requests.append(('plan' if self.planning else 'people', year, sources))
+            protected = {Path(p).resolve() for p in self.loaded_files}
+            protected.update(Path(p).resolve() for p in getattr(self, 'protected_paths', lambda: [])())
+            for kind, year, sources in requests:
+                chosen = self.choose_source_path(kind, year, sources)
+                if not chosen:
+                    self.statusBar().showMessage('저장 위치 필요 · 편집 내용은 메모리에 보존됩니다.')
+                    self.set_save_status('저장 위치 필요')
+                    return False
+                path = Path(chosen).resolve()
+                if path in protected or any(path == item[2] for item in selected):
+                    raise ValueError(f'열린 원본 또는 다른 문서와 같은 저장 경로입니다: {path}')
+                existing = hashlib.sha256(path.read_bytes()).digest() if path.exists() else None
+                if existing is not None and not self.confirm('기존 파일 덮어쓰기', f'{path}\n기존 파일을 교체할까요?'):
+                    self.set_save_status('저장 위치 필요')
+                    return False
+                selected.append((kind, year, path, sources, existing))
+            if self._autosave:
+                self._autosave.check_fingerprints()
+                unsafe = self._autosave_paths & self._unsupported_sources
+                if unsafe:
+                    raise ValueError('지원하지 않는 원본 항목이 있어 저장할 수 없습니다: '
+                                     + ', '.join(map(str, unsafe)))
+            guards = dict(self._autosave.fingerprints) if self._autosave else {}
+            for _, _, _, sources, _ in selected:
+                for source in sources:
+                    path = Path(source).resolve()
+                    expected = self.file_fingerprints.get(str(path))
+                    if expected is None or not path.exists() or hashlib.sha256(path.read_bytes()).digest() != expected:
+                        raise ValueError(f'원본 외부 변경 충돌: {path}')
+                    guards[path] = expected
+                    if path in self._unsupported_sources:
+                        raise ValueError(f'지원하지 않는 원본 항목이 있습니다: {path}')
+            jobs = []
+            expected = {}
+            encodings = {}
+            old = self._autosave.state if self._autosave else None
+            current = self._business_snapshot()
+            index, dump = (2, dump_plan) if self.planning else (1, dump_people)
+            if old and self._autosave_project and dump_projects(old[0]) != dump_projects(current[0]):
+                path = self._autosave_project
+                jobs.append((path, dump_projects(current[0]), 'projects'))
+                expected[path] = self._autosave.fingerprints[path]
+            if old:
+                for year, path in self._autosave_people.items():
+                    if year in old[index] and year in current[index] and dump(old[index][year]) != dump(current[index][year]):
+                        jobs.append((path, dump(current[index][year]), ('plan:' if self.planning else 'people:') + year))
+                        expected[path] = self._autosave.fingerprints[path]
+            for kind, year, path, _, fingerprint in selected:
+                text = dump_projects(current[0]) if kind == 'projects' else dump(current[index][year])
+                jobs.append((path, text, kind if year is None else kind + ':' + year))
+                expected[path] = fingerprint
+            prepared = []
+            for path, text, key in jobs:
+                code = (self._autosave_encodings[path] if self._autosave and path in self._autosave_encodings
+                        else self.choose_output_encoding(path, key, True))
+                if code is None:
+                    self.set_save_status('저장 위치 필요')
+                    return False
+                try:
+                    data = encode_yaml(text, code)
+                except UnicodeEncodeError:
+                    if not self.confirm('UTF-8로 저장할까요?', f'{path}\n원본 인코딩으로 표현할 수 없습니다. UTF-8로 저장할까요?'):
+                        self.set_save_status('저장 위치 필요')
+                        return False
+                    code, data = 'utf-8', encode_yaml(text, 'utf-8')
+                prepared.append((path, data))
+                encodings[path] = code
+            self.set_save_status('저장 중')
+            write_bundle(prepared, self.backed_up, expected=expected, guards=guards)
+            success = True
+        except (OSError, UnicodeError, ValueError, TypeError, DocumentError) as exc:
+            if '원본 복구 실패' in str(exc):
+                self._autosave_blocked = True
+            self.save_failure_status(exc)
+            self.warn('저장 위치 지정 실패', str(exc))
+            return False
+        finally:
+            if success:
+                self._binding_deferred_projects = False
+                self._binding_deferred_years.clear()
+            elif (touched_projects and touched_years) or len(touched_years) > 1:
+                self._binding_deferred_projects |= touched_projects
+                self._binding_deferred_years.update(touched_years)
+            self._autosave_touched_projects = False
+            self._autosave_touched_years.clear()
+            self._autosave_selection = None
+            self._history_before = None
+        for path, data in prepared:
+            self.file_fingerprints[str(path)] = hashlib.sha256(data).digest()
+            self.file_encodings[str(path)] = (encodings[path], '저장 인코딩')
+            self.read_encodings[str(path)] = encodings[path]
+        for kind, year, path, sources, _ in selected:
+            if kind == 'projects':
+                self.projects_sources = [str(path)]
+                self.projects_dirty = False
+                self._source_metadata[str(path)] = deepcopy(getattr(self.project_editor.projects, 'metadata', None))
+            elif kind == 'plan':
+                self.plan_sources[year] = str(path)
+                self.plan_dirty[year] = False
+                self._source_metadata[str(path)] = deepcopy(self.plan_docs[year].metadata)
+            else:
+                self.people_sources[year] = [str(path)]
+                self.people_dirty[year] = False
+                self._source_metadata[str(path)] = deepcopy(self.people_docs[year].metadata)
+            self.document_encodings[kind if year is None else kind + ':' + year] = {encodings[path]}
+            self.loaded_files = [p for p in self.loaded_files if p not in sources]
+            self.loaded_files.append(str(path))
+        for path, _, key in jobs:
+            self.document_encodings[key] = {encodings[path]}
+            if key == 'projects':
+                self.projects_dirty = False
+            elif key.startswith('plan:'):
+                self.plan_dirty[key[5:]] = False
+            elif key.startswith('people:'):
+                self.people_dirty[key[7:]] = False
+        self.settings.setValue('loaded_files', self.loaded_files)
+        self.persist_read_encodings()
+        self._bind_autosave()
+        self.refresh_marks()
+        self.update_save_status(reset=True)
+        self.statusBar().showMessage('저장 위치 지정 및 원본 저장 완료')
+        return True
+
     def persist_read_encodings(self):
         self.settings.setValue('read_encodings', json.dumps(self.read_encodings, ensure_ascii=False))
 
@@ -654,7 +1251,7 @@ class WorkspaceWindow(QMainWindow):
                                         list(ENCODINGS.values()), 0, False)
         return next(code for code, text in ENCODINGS.items() if text == label) if ok else None
 
-    def write_yaml_jobs(self, jobs, encoding='preserve', interactive=False, adopt_document=True):
+    def write_yaml_jobs(self, jobs, encoding='preserve', interactive=False, adopt_document=True, expected=None):
         """변환·사용자 확인이 모두 끝나야 파일 묶음을 교체한다. 실패 시 메타데이터도 유지한다."""
         prepared, resolved = [], []
         try:
@@ -677,12 +1274,16 @@ class WorkspaceWindow(QMainWindow):
                     code, data = 'utf-8', encode_yaml(text, 'utf-8')
                 prepared.append((path, data))
                 resolved.append((path, key, code))
-            write_bundle(prepared, self.backed_up)
+            write_bundle(prepared, self.backed_up, expected=expected)
         except (OSError, UnicodeError, ValueError) as exc:
+            if '원본 복구 실패' in str(exc):
+                self._autosave_blocked = True
+            self.save_failure_status(exc)
             self.warn('YAML 저장 실패', str(exc))
             return False
-        for path, key, code in resolved:
+        for (path, key, code), (_, data) in zip(resolved, prepared):
             canonical = str(path.resolve())
+            self.file_fingerprints[canonical] = hashlib.sha256(data).digest()
             self.file_encodings[canonical] = (code, '저장 인코딩')
             self.read_encodings[canonical] = code
             # 병합 결과를 저장한 다음에는 이 인코딩이 새 경로 저장의 기준이 된다.
@@ -694,14 +1295,18 @@ class WorkspaceWindow(QMainWindow):
 
     def projects_changed(self):
         self.set_projects_dirty(True)
+        self._autosave_touched_projects = True
         self.people_editor.refresh()
         self.planning_page.refresh_review()
+        self._schedule_autosave()
 
     def alias_renamed(self, old, new):
         for year, doc in self.people_docs.items():
             if self.people_editor.count_alias(old, doc):
                 self.people_editor.rename_alias(old, new, doc)
                 self.set_people_dirty(year, True)
+                if not self.planning:
+                    self._autosave_touched_years.add(year)
         for year, doc in self.plan_docs.items():
             changed = False
             for person in doc.people:
@@ -715,6 +1320,8 @@ class WorkspaceWindow(QMainWindow):
                     changed = True
             if changed:
                 self.plan_dirty[year] = True
+                if self.planning:
+                    self._autosave_touched_years.add(year)
         self.planning_page.refresh()
         self.refresh_marks()
 
@@ -723,6 +1330,8 @@ class WorkspaceWindow(QMainWindow):
             if any(alias in person.allocations or alias in person.fixed for person in doc.people):
                 self.people_editor.remove_alias(alias, doc)
                 self.set_people_dirty(year, True)
+                if not self.planning:
+                    self._autosave_touched_years.add(year)
         for year, doc in self.plan_docs.items():
             changed = False
             for person in doc.people:
@@ -734,6 +1343,8 @@ class WorkspaceWindow(QMainWindow):
                     changed = True
             if changed:
                 self.plan_dirty[year] = True
+                if self.planning:
+                    self._autosave_touched_years.add(year)
         self.planning_page.refresh()
         self.refresh_marks()
 
@@ -756,6 +1367,11 @@ class WorkspaceWindow(QMainWindow):
 
     def keep_all(self, what='입력'):
         """내보내지 않은 변경을 처리한다. 진행해도 되면 True."""
+        focus = QApplication.focusWidget()
+        if focus is not None and self.isAncestorOf(focus):
+            focus.clearFocus()
+        if not self.flush_autosave():
+            return False
         if not (self.projects_dirty or any(self.people_dirty.values()) or any(self.plan_dirty.values())):
             return True
         answer = self.ask_export(what)
@@ -763,16 +1379,7 @@ class WorkspaceWindow(QMainWindow):
             return True
         if answer != 'export':
             return False
-        if self.planning:
-            for year in sorted(self.plan_docs):
-                if self.projects_dirty or self.plan_dirty.get(year):
-                    self.select_year(year)
-                    if not self.browse_save_plan():
-                        return False
-            return True
-        if (self.projects_dirty or any(self.people_dirty.values())) and not self.browse_export():
-            return False
-        return not any(self.plan_dirty.values()) or self.browse_save_plan()
+        return self.browse_bind_sources()
 
     def keep_year(self, year):
         """해당 연도의 변경을 처리한다. 진행해도 되면 True."""
@@ -783,9 +1390,7 @@ class WorkspaceWindow(QMainWindow):
             return True
         if answer != 'export':
             return False
-        if self.people_dirty.get(year) and not self.browse_export():
-            return False
-        return not self.plan_dirty.get(year) or self.browse_save_plan()
+        return self.browse_bind_sources()
 
     def start_folder(self, which='import'):
         if which == 'export':
@@ -842,6 +1447,8 @@ class WorkspaceWindow(QMainWindow):
         if doc.year in self.plan_docs and self.plan_docs[doc.year].people:
             if not self.confirm('계획 교체', f'{doc.year}년의 현재 계획을 새 참고 자료로 바꿀까요?'):
                 return False
+        if not self.flush_autosave():
+            return False
         self.people_docs.setdefault(doc.year, PeopleDoc(doc.year, []))
         self.people_dirty.setdefault(doc.year, False)
         self.people_sources.setdefault(doc.year, [])
@@ -856,6 +1463,7 @@ class WorkspaceWindow(QMainWindow):
         if any(person.fixed for person in people.people):
             message += ' 이전 연도의 월 고정값은 복사하지 않았습니다.'
         self.statusBar().showMessage(message)
+        self.update_save_status()
         return True
 
     def run_import(self, paths, encoding=None):
@@ -869,13 +1477,29 @@ class WorkspaceWindow(QMainWindow):
                       + '\n'.join(lines[:20]) + ('\n...' if len(lines) > 20 else ''))
 
     def import_files(self, paths, encoding=None):
+        if not self._import_depth and not self.flush_autosave():
+            return ['기존 변경을 저장하지 못해 불러오기를 취소했습니다.'], []
+        if not self._import_depth and (self._binding_deferred_projects or self._binding_deferred_years):
+            return ['연관된 미저장 변경의 저장 위치를 먼저 지정하세요.'], []
+        before = len(self.loaded_files)
+        self._import_depth += 1
+        try:
+            return self._import_files(paths, encoding)
+        finally:
+            self._import_depth -= 1
+            if not self._import_depth and len(self.loaded_files) != before:
+                self.history_invalidated.emit()
+                self._bind_autosave()
+
+    def _import_files(self, paths, encoding=None):
         """파일을 추가로 불러온다. 성공한 것만 반영하고 (실패 설명, 지원 외 항목)을 돌려준다."""
         errors, dropped, imported_people, migrated = [], [], [], []
         for path in paths:
             try:
                 canonical = str(Path(path).resolve())
                 selected = encoding if encoding is not None else self.read_encodings.get(canonical, 'auto')
-                decoded = decode_yaml(Path(path).read_bytes(), selected)
+                raw_bytes = Path(path).read_bytes()
+                decoded = decode_yaml(raw_bytes, selected)
                 text = decoded.text
                 kind = detect_kind(text)
                 if kind is None:
@@ -904,7 +1528,14 @@ class WorkspaceWindow(QMainWindow):
                     continue
                 pristine = (not self.project_editor.projects and not self.projects_dirty
                            and not self.projects_sources)
-                self.project_editor.projects.extend(document)
+                if pristine:
+                    self.project_editor.set_projects(document)
+                else:
+                    if not isinstance(self.project_editor.projects, ProjectList):
+                        self.project_editor.projects = ProjectList(self.project_editor.projects)
+                    self.project_editor.projects.extend(document)
+                    self.project_editor.projects.metadata = self.merged_metadata(
+                        self.projects_sources + [str(path)], canonical, document.metadata)
                 self.projects_sources.append(str(path))
                 self.project_editor.refresh()
                 if self.project_editor.table.currentRow() < 0 and self.project_editor.projects:
@@ -947,6 +1578,8 @@ class WorkspaceWindow(QMainWindow):
                                       + ', '.join(dupes[:5]) + (' 외' if len(dupes) > 5 else ''))
                         continue
                     existing.people.extend(document.people)
+                    existing.metadata = self.merged_metadata(self.people_sources[year] + [str(path)],
+                                                             canonical, document.metadata)
                     self.people_sources[year].append(str(path))
                     self.set_people_dirty(year, True)
                     if year == self.current_year:
@@ -958,6 +1591,13 @@ class WorkspaceWindow(QMainWindow):
                     self.select_year(year)
                 imported_people.append(str(path))
             self.loaded_files.append(str(path))
+            self._source_metadata[canonical] = deepcopy(document.metadata if kind != 'projects'
+                                                        else getattr(document, 'metadata', None))
+            if file_dropped:
+                self._unsupported_sources.add(Path(path).resolve())
+            else:
+                self._unsupported_sources.discard(Path(path).resolve())
+            self.file_fingerprints[canonical] = hashlib.sha256(raw_bytes).digest()
             key = 'projects' if kind == 'projects' else kind + ':' + year
             self.remember_encoding(path, decoded, key)
             if selected == 'auto':
@@ -979,10 +1619,14 @@ class WorkspaceWindow(QMainWindow):
                 message += ' · 이전 계획 형식 변환 (참고점수 0, 결과·순위 보존): ' + ', '.join(migrated)
             self.statusBar().showMessage(message)
         self.refresh_encoding_label()
+        self.update_save_status()
         return errors, dropped
 
     def select_year(self, year):
         """고른 연도 문서를 편집기에 올린다. 사업 연도 표도 그 연도 기준으로 옮긴다."""
+        if (year != self.current_year and not self._import_depth and not self._autosave_restoring
+                and not self.flush_autosave()):
+            return
         self.current_year = year
         self.people_editor.blockSignals(True)
         self.people_editor.set_doc(self.people_docs[year])
@@ -995,10 +1639,14 @@ class WorkspaceWindow(QMainWindow):
         self.project_editor.reset_years()
         self.refresh_marks()
         self.settings.setValue('current_year', year)
+        self.update_save_status()
 
     def year_combo_changed(self, index):
         year = self.year_combo.itemData(index)
         if year is not None and year != self.current_year:
+            if not self.flush_autosave():
+                self.refresh_year_combo()
+                return
             self.select_year(year)
 
     def flush_year_edit(self):
@@ -1012,21 +1660,37 @@ class WorkspaceWindow(QMainWindow):
         if typed in self.people_docs:
             self.warn('연도 입력', f'{typed}년 입력이 이미 열려 있습니다.')
             return False
-        self.people_docs[typed] = self.people_docs.pop(self.current_year)
-        self.people_dirty[typed] = self.people_dirty.pop(self.current_year)
-        self.people_sources[typed] = self.people_sources.pop(self.current_year)
-        for kind in ('people', 'plan'):
-            codes = self.document_encodings.pop(kind + ':' + str(self.current_year), None)
-            if codes is not None:
-                self.document_encodings[kind + ':' + typed] = codes
-        if self.current_year in self.plan_docs:
-            self.plan_docs[typed] = self.plan_docs.pop(self.current_year)
-            self.plan_docs[typed].year = typed
-            self.plan_dirty[typed] = self.plan_dirty.pop(self.current_year)
-            self.plan_sources[typed] = self.plan_sources.pop(self.current_year)
-        self.people_editor.doc.year = typed
+        old_year = self.current_year
+        if self.plan_sources.get(old_year) or self.plan_docs.get(old_year, PlanDoc()).people:
+            self.warn('연도 입력', '기존 계획 문서가 있어 연도를 변경할 수 없습니다. 새 연도를 추가하세요.')
+            return False
+        old_people, old_dirty, old_sources = (self.people_docs.copy(), self.people_dirty.copy(),
+                                               deepcopy(self.people_sources))
+        old_plans, old_plan_dirty, old_plan_sources = (self.plan_docs.copy(), self.plan_dirty.copy(),
+                                                       self.plan_sources.copy())
+        old_encoding = deepcopy(self.document_encodings)
+        self.people_docs[typed] = self.people_docs.pop(old_year)
+        self.people_dirty[typed] = self.people_dirty.pop(old_year)
+        self.people_sources[typed] = self.people_sources.pop(old_year)
+        self.plan_docs.pop(old_year, None)
+        self.plan_dirty.pop(old_year, None)
+        self.plan_sources.pop(old_year, None)
+        self.plan_docs[typed] = PlanDoc(typed, [])
+        self.plan_dirty[typed] = False
+        self.plan_sources[typed] = ''
+        if 'people:' + old_year in self.document_encodings:
+            self.document_encodings['people:' + typed] = set(self.document_encodings['people:' + old_year])
         self.current_year = typed
-        self.refresh_year_combo()
+        self._autosave_touched_years.add(typed)
+        if not self._save_new_bindings(False, {typed}):
+            self.people_docs, self.people_dirty, self.people_sources = old_people, old_dirty, old_sources
+            self.plan_docs, self.plan_dirty, self.plan_sources = old_plans, old_plan_dirty, old_plan_sources
+            self.document_encodings = old_encoding
+            self.current_year = old_year
+            self.refresh_marks()
+            return False
+        self.settings.setValue('current_year', typed)
+        self.select_year(typed)
         return True
 
     def add_year(self):
@@ -1039,6 +1703,8 @@ class WorkspaceWindow(QMainWindow):
         if year in self.people_docs:
             self.select_year(year)
             self.statusBar().showMessage(f'이미 열린 연도입니다: {year}')
+            return
+        if not self.flush_autosave():
             return
         self.people_docs[year] = PeopleDoc(year, [])
         self.people_dirty[year] = False
@@ -1054,8 +1720,11 @@ class WorkspaceWindow(QMainWindow):
         if len(self.people_docs) <= 1:
             self.statusBar().showMessage('연도 문서는 최소 하나 있어야 합니다.')
             return
+        if not self.flush_autosave():
+            return
         if not self.keep_year(year):
             return
+        self._autosave = None
         years = sorted(self.people_docs)
         rest = [y for y in years if y != year]
         closed_sources = self.people_sources.pop(year, [])
@@ -1071,12 +1740,18 @@ class WorkspaceWindow(QMainWindow):
             self.loaded_files = [p for p in self.loaded_files if p != plan_source]
         self.settings.setValue('loaded_files', self.loaded_files)
         self.select_year(rest[min(years.index(year), len(rest) - 1)])
+        self._bind_autosave()
         self.statusBar().showMessage(f'연도 닫기: {year}')
 
     def new_all(self):
         """미반영 변경을 처리한 뒤 사업·사람 전체를 비우고 올해 빈 연도로 시작한다."""
         if not self.keep_all():
             return
+        self.history_invalidated.emit()
+        self._autosave = None
+        self._binding_deferred_projects = False
+        self._binding_deferred_years.clear()
+        self._unsupported_sources.clear()
         self.project_editor.set_projects([])
         today = PeopleDoc().year
         self.people_docs = {today: PeopleDoc()}
@@ -1088,6 +1763,8 @@ class WorkspaceWindow(QMainWindow):
         self.projects_sources = []
         self.document_encodings.clear()
         self.file_encodings.clear()
+        self.file_fingerprints.clear()
+        self._source_metadata.clear()
         self.loaded_files = []
         self.settings.setValue('loaded_files', [])
         self.set_projects_dirty(False)
@@ -1095,49 +1772,184 @@ class WorkspaceWindow(QMainWindow):
         self.select_year(today)
         self.show_page(self.INPUT_PAGE)
         self.statusBar().showMessage('새로 만들기: 빈 입력으로 시작합니다.')
+        self.update_save_status(reset=True)
+
+    def browse_new(self):
+        """두 파일의 위치를 먼저 선택하고 생성이 완료된 뒤 현재 문서를 교체한다."""
+        year = PeopleDoc().year
+        kind = 'plan' if self.planning else 'people'
+        chosen = []
+        protected = {Path(p).resolve() for p in self.loaded_files}
+        protected.update(Path(p).resolve() for p in getattr(self, 'protected_paths', lambda: [])())
+        try:
+            for name, target_year in (('projects', None), (kind, year)):
+                raw = self.choose_source_path(name, target_year, [])
+                if not raw:
+                    return False
+                path = Path(raw).resolve()
+                if path in protected or any(path == item[0] for item in chosen):
+                    raise ValueError(f'열린 원본 또는 다른 문서와 같은 경로입니다: {path}')
+                fingerprint = hashlib.sha256(path.read_bytes()).digest() if path.exists() else None
+                if fingerprint is not None and not self.confirm('기존 파일 덮어쓰기', f'{path}\n기존 파일을 교체할까요?'):
+                    return False
+                chosen.append((path, fingerprint))
+            if not self.keep_all():
+                return False
+            project_doc = ProjectList()
+            person_doc = PeopleDoc(year, [])
+            plan_doc = PlanDoc(year, [])
+            texts = [dump_projects(project_doc), dump_plan(plan_doc) if self.planning else dump_people(person_doc)]
+            prepared = [(path, encode_yaml(text, 'utf-8')) for (path, _), text in zip(chosen, texts)]
+            self.set_save_status('저장 중')
+            write_bundle(prepared, self.backed_up, expected={path: fingerprint for path, fingerprint in chosen})
+        except (OSError, UnicodeError, ValueError, TypeError, DocumentError) as exc:
+            self.save_failure_status(exc)
+            self.warn('새 문서 생성 실패', str(exc))
+            return False
+        self.history_invalidated.emit()
+        self._autosave = None
+        self._binding_deferred_projects = False
+        self._binding_deferred_years.clear()
+        self._unsupported_sources.clear()
+        self.project_editor.set_projects(project_doc)
+        self.people_docs = {year: person_doc}
+        self.people_dirty = {year: False}
+        self.people_sources = {year: [] if self.planning else [str(chosen[1][0])]}
+        self.plan_docs = {year: plan_doc}
+        self.plan_dirty = {year: False}
+        self.plan_sources = {year: str(chosen[1][0]) if self.planning else ''}
+        self.projects_sources = [str(chosen[0][0])]
+        self.projects_dirty = False
+        self.loaded_files = [str(path) for path, _ in chosen]
+        self.file_fingerprints = {str(path): hashlib.sha256(data).digest() for path, data in prepared}
+        self.file_encodings = {str(path): ('utf-8', '새 문서') for path, _ in chosen}
+        self.document_encodings = {'projects': {'utf-8'}, kind + ':' + year: {'utf-8'}}
+        self._source_metadata = {str(path): None for path, _ in chosen}
+        self.current_year = None
+        self.select_year(year)
+        self.settings.setValue('loaded_files', self.loaded_files)
+        self._bind_autosave()
+        self.show_page(self.INPUT_PAGE)
+        self.refresh_marks()
+        self.update_save_status(reset=True)
+        self.statusBar().showMessage('새 문서 생성 완료')
+        return True
+
+    def prepare_copy(self):
+        """마지막 편집을 확정한다. 원본 위치 취소는 사본 보존을 막지 않는다."""
+        focus = QApplication.focusWidget()
+        if focus is not None and self.isAncestorOf(focus):
+            focus.clearFocus()
+        if self._autosave_pending:
+            self.flush_autosave()
+
+    def ask_copy_kind(self):
+        choices = ['작업자료 묶음', '사업 파일 사본', '현재 연도 파일 사본']
+        if self.planning:
+            choices.append('실적용 확정 묶음')
+        choice, ok = QInputDialog.getItem(self, '내보내기', '내보낼 자료:', choices, 0, False)
+        return choice if ok else ''
+
+    def ask_copy_file(self, title):
+        path, _ = QFileDialog.getSaveFileName(self, title, self.start_folder('export') or '.', YAML_FILTER)
+        if not path:
+            return '', 'preserve'
+        options = ['원본 인코딩 유지'] + list(ENCODINGS.values())
+        choice, ok = QInputDialog.getItem(self, '사본 인코딩', '저장 인코딩:', options, 0, False)
+        if not ok:
+            return '', 'preserve'
+        return path, ('preserve' if choice == options[0] else next(code for code, label in ENCODINGS.items() if label == choice))
 
     def browse_export(self):
-        if self.planning:
+        self.prepare_copy()
+        choice = self.ask_copy_kind()
+        if choice == '작업자료 묶음':
+            return self.browse_work_copy()
+        if choice == '사업 파일 사본':
+            path, code = self.ask_copy_file('사업 파일 사본')
+            return bool(path) and self.export_one(path, 'projects', code, True)
+        if choice == '현재 연도 파일 사본':
+            path, code = self.ask_copy_file('현재 연도 파일 사본')
+            return bool(path) and self.export_one(path, 'current', code, True)
+        if choice == '실적용 확정 묶음':
             return self.browse_confirm_plan()
+        return False
+
+    def browse_work_copy(self):
+        self.prepare_copy()
         self._save_encoding = 'preserve'
         folder = self.ask_export_folder()
-        if not folder:
-            return False
-        return self.export_all(folder, encoding=self._save_encoding, interactive=True)
+        return bool(folder) and self.export_all(folder, encoding=self._save_encoding, interactive=True)
 
     def browse_save_plan(self):
-        self._save_encoding = 'preserve'
-        folder = self.ask_export_folder()
-        return bool(folder) and self.save_plan(folder, encoding=self._save_encoding, interactive=True)
+        return self.browse_work_copy()
 
     def save_plan(self, folder, encoding='preserve', interactive=False):
-        """오류가 남은 수동 초안도 별도 계획 파일에 보존한다."""
-        if not self.flush_year_edit():
+        """호환 호출: 계획 작업자료 사본이며 원본을 변경하지 않는다."""
+        return self.export_all(folder, encoding, interactive)
+
+    def _copy_sources(self, key):
+        if key == 'projects':
+            return self.projects_sources
+        kind, year = key.split(':', 1)
+        if kind == 'plan':
+            return [self.plan_sources[year]] if self.plan_sources.get(year) else []
+        return self.people_sources.get(year, [])
+
+    def _write_copy_jobs(self, jobs, encoding='preserve', interactive=False):
+        """사본의 경로·변환·지문을 검증한 뒤 원본 메타데이터 변경 없이 교체한다."""
+        protected = {Path(p).resolve() for p in self.loaded_files}
+        protected.update(Path(p).resolve() for p in self.projects_sources)
+        protected.update(Path(p).resolve() for sources in self.people_sources.values() for p in sources)
+        protected.update(Path(p).resolve() for p in self.plan_sources.values() if p)
+        protected.update(Path(p).resolve() for p in getattr(self, 'protected_paths', lambda: [])())
+        prepared, expected = [], {}
+        previous_status = None
+        try:
+            for raw_path, text, key in jobs:
+                path = Path(raw_path).resolve()
+                if path in protected:
+                    raise ValueError(f'열린 원본에는 사본을 쓸 수 없습니다: {path}')
+                if path in expected:
+                    raise ValueError(f'중복된 사본 경로: {path}')
+                unsafe = {Path(p).resolve() for p in self._copy_sources(key)} & self._unsupported_sources
+                if unsafe:
+                    raise ValueError('지원하지 않는 원본 항목이 있어 사본을 만들 수 없습니다: ' + ', '.join(map(str, unsafe)))
+                fingerprint = hashlib.sha256(path.read_bytes()).digest() if path.exists() else None
+                if fingerprint is not None and not self.confirm('기존 사본 덮어쓰기', f'{path}\n기존 파일을 교체할까요?'):
+                    return False
+                code = self.choose_output_encoding(path, key, interactive) if encoding == 'preserve' else encoding
+                if code is None:
+                    return False
+                try:
+                    data = encode_yaml(text, code)
+                except UnicodeEncodeError:
+                    if not interactive or not self.confirm('UTF-8로 사본을 저장할까요?', f'{path}\nUTF-8로 사본을 저장할까요?'):
+                        return False
+                    data = encode_yaml(text, 'utf-8')
+                expected[path] = fingerprint
+                prepared.append((path, data))
+            previous_status = (self.save_status_label.text(), self.save_status_label.toolTip())
+            self.set_save_status('저장 중')
+            write_bundle(prepared, self._copy_backed_up, expected=expected)
+        except (OSError, UnicodeError, ValueError, TypeError, DocumentError) as exc:
+            self.warn('사본 내보내기 실패', str(exc))
             return False
-        target = Path(folder)
-        plan_path = target / 'plans' / f'plan_{self.current_year}.yaml'
-        previous_sources = set(self.projects_sources)
-        previous_sources.add(self.plan_sources.get(self.current_year, ''))
-        if not self.write_yaml_jobs([
-                (target / 'projects.yaml', dump_projects(self.project_editor.projects), 'projects'),
-                (plan_path, dump_plan(self.plan_docs[self.current_year]), 'plan:' + self.current_year)],
-                encoding, interactive):
-            return False
-        self.plan_sources[self.current_year] = str(plan_path)
-        self.planning_page.plan_path = str(plan_path)
-        self.plan_dirty[self.current_year] = False
-        self.plan_docs[self.current_year].migrated = False
-        self.projects_sources = [str(target / 'projects.yaml')]
-        self.set_projects_dirty(False)
-        self.loaded_files = [path for path in self.loaded_files if path not in previous_sources]
-        for path in (str(target / 'projects.yaml'), str(plan_path)):
-            if path not in self.loaded_files:
-                self.loaded_files.append(path)
-        self.settings.setValue('loaded_files', self.loaded_files)
-        self.settings.setValue('export_folder', str(folder))
-        self.refresh_marks()
-        self.statusBar().showMessage(f'계획 저장: {plan_path}')
+        finally:
+            if previous_status is not None:
+                self.save_status_label.setText(previous_status[0])
+                self.save_status_label.setToolTip(previous_status[1])
+        self.statusBar().showMessage('작업자료 사본 내보내기 완료')
         return True
+
+    def export_one(self, path, kind, encoding='preserve', interactive=False):
+        self.prepare_copy()
+        if kind == 'projects':
+            return self._write_copy_jobs([(path, dump_projects(self.project_editor.projects), 'projects')], encoding, interactive)
+        year = self.current_year
+        doc = self.plan_docs[year] if self.planning else self.people_docs[year]
+        dump = dump_plan if self.planning else dump_people
+        return self._write_copy_jobs([(path, dump(doc), ('plan:' if self.planning else 'people:') + year)], encoding, interactive)
 
     def browse_confirm_plan(self):
         self._save_encoding = 'preserve'
@@ -1146,8 +1958,7 @@ class WorkspaceWindow(QMainWindow):
 
     def confirm_plan(self, folder, encoding='preserve', interactive=False):
         """현재 초안을 월별 엔진으로 검증한 뒤 확정 파일을 따로 만든다."""
-        if not self.flush_year_edit():
-            return False
+        self.prepare_copy()
         plan, review = self.planning_page.refresh_review()
         if plan is None or review is None or review.has_errors:
             self.warn('확정 불가', '계획 화면의 ERROR를 먼저 해결하세요.')
@@ -1169,32 +1980,27 @@ class WorkspaceWindow(QMainWindow):
         if project_path.resolve() in protected or path.resolve() in protected:
             self.warn('별도 폴더 필요', '계획 작업 자료·불러온 원본과 다른 폴더로 내보내세요.')
             return False
-        if not self.write_yaml_jobs([
+        if not self._write_copy_jobs([
                 (project_path, dump_projects(self.project_editor.projects), 'projects'),
                 (path, dump_people(doc), 'plan:' + self.current_year)],
-                encoding, interactive, adopt_document=False):
+                encoding, interactive):
             return False
-        self.settings.setValue('export_folder', str(folder))
         self.statusBar().showMessage(f'확정 파일 생성: {path}')
         return True
 
     def export_all(self, folder, encoding='preserve', interactive=False):
-        """폴더에 projects.yaml과 연도별 사람 파일을 쓴다. 전부 성공하면 True."""
-        if not self.flush_year_edit():
-            return False
+        """현재 작업자료 묶음을 사본으로 쓴다. 원본과 dirty는 변경하지 않는다."""
+        self.prepare_copy()
         target = Path(folder)
         jobs = [(target / 'projects.yaml', dump_projects(self.project_editor.projects), 'projects')]
-        for year in sorted(self.people_docs):
-            jobs.append((target / 'people' / f'people_{year}.yaml', dump_people(self.people_docs[year]),
-                         'people:' + year))
-        if not self.write_yaml_jobs(jobs, encoding, interactive):
-            return False
-        self.set_projects_dirty(False)
-        for year in self.people_dirty:
-            self.set_people_dirty(year, False)
-        self.settings.setValue('export_folder', str(folder))
-        self.statusBar().showMessage(f'내보내기: {folder} (사업 1개 · 사람 {len(jobs) - 1}개 연도)')
-        return True
+        docs, dump, prefix = ((self.plan_docs, dump_plan, 'plan') if self.planning
+                              else (self.people_docs, dump_people, 'people'))
+        for year in sorted(docs):
+            doc = docs[year]
+            output_year = doc.year if valid_year(doc.year) else year
+            folder_name = 'plans' if self.planning else 'people'
+            jobs.append((target / folder_name / f'{prefix}_{output_year}.yaml', dump(doc), prefix + ':' + year))
+        return self._write_copy_jobs(jobs, encoding, interactive)
 
     def restore_or_default(self):
         """지난번에 불러온 파일들을 다시 연다. 열린 연도가 없으면 올해 빈 연도로 시작한다."""
@@ -1227,6 +2033,12 @@ class WorkspaceWindow(QMainWindow):
         return projects, people
 
     def closeEvent(self, event):
+        if self._autosave_blocked:
+            if self.confirm('복구 필요', '파일 복구에 실패했습니다. 안내된 복구 파일을 보존한 뒤 종료할까요?'):
+                event.accept()
+            else:
+                event.ignore()
+            return
         if self.keep_all():
             event.accept()
         else:
@@ -1295,6 +2107,8 @@ class WorkspaceWindow(QMainWindow):
 
     def toggle_project_pin(self, name, alias):
         """개별 사람·사업의 월별 고정 상태를 전환하고 단일 원본 파일에 실시간 저장한다."""
+        if not self.flush_autosave():
+            return False
         year, doc, entry = self._result_person_entry(name)
         units = self.result.allocations.get(name, {}).get(alias) if self.result is not None else None
         if entry is None or units is None:
@@ -1311,6 +2125,8 @@ class WorkspaceWindow(QMainWindow):
 
     def toggle_person_pin(self, name):
         """사람의 전체 사업 월별 고정 상태를 전환한다. 일부 고정 상태는 전체 고정으로 전환한다."""
+        if not self.flush_autosave():
+            return False
         year, doc, entry = self._result_person_entry(name)
         allocs = self.result.allocations.get(name, {}) if self.result is not None else {}
         if entry is None or not allocs:
@@ -1332,17 +2148,29 @@ class WorkspaceWindow(QMainWindow):
 
     def _finish_pin_change(self, year, doc, entry, old_fixed, action, recalculate=False):
         sources = self.people_sources.get(year, [])
-        if len(sources) == 1:
-            target = sources[0]
-            if not self.write_yaml_jobs([(target, dump_people(doc), 'people:' + year)],
-                                        encoding='preserve', interactive=True):
-                entry.fixed = old_fixed
-                return False
-            self.set_people_dirty(year, False)
-            save_note = f' ({Path(target).name} 저장됨)'
+        if self._autosave and year in self._autosave_people:
+            self._autosave_pending = True
+            self._history_before = self.history_context()
+            self._history_action = '개인상세 — 월별 고정'
+            try:
+                if not self.flush_autosave():
+                    return False
+            finally:
+                self._history_action = None
+            save_note = f' ({Path(sources[0]).name} 저장됨)'
+        elif len(sources) == 1:
+            # 계산이 의존하는 모든 원본의 기준 지문을 확보하지 못하면
+            # 사람 파일만 별도로 저장해서 오래된 계산을 확정하지 않는다.
+            entry.fixed = old_fixed
+            self.warn('원본 저장 차단', '원본의 저장 기준을 확인할 수 없습니다. 파일을 다시 불러오세요.')
+            return False
         else:
             self.set_people_dirty(year, True)
-            save_note = ' (저장된 단일 사람 파일이 없어 메모리에만 반영했습니다. 파일 → 저장으로 저장하세요.)'
+            self._autosave_touched_years.add(year)
+            if self._save_new_bindings(False, {year}):
+                save_note = f' ({Path(self.people_sources[year][0]).name} 저장됨)'
+            else:
+                save_note = ' (저장 위치 필요 · 변경 내용은 메모리에 보존됩니다.)'
 
         # 입력 탭의 월별 고정 표와 사람 목록 상태를 즉시 맞춘다.
         if year == self.current_year and self.people_editor.doc is doc:
@@ -1434,6 +2262,8 @@ class WorkspaceWindow(QMainWindow):
 
     def generate(self):
         """입력 화면의 현재 내용(내보내기 전이어도)을 파일과 같은 규칙으로 검증·계산해 결과 화면에 보여 준다."""
+        if not self.flush_autosave():
+            return
         if not self.flush_year_edit():
             self.show_page(self.INPUT_PAGE)
             return
@@ -1510,6 +2340,9 @@ class WorkspaceWindow(QMainWindow):
             self.save_excel(path if path.lower().endswith('.xlsx') else path + '.xlsx')
 
     def save_excel(self, path):
+        if self.result is None or self.result.has_errors:
+            self.warn('엑셀 저장 불가', '오류 없는 계산 결과가 필요합니다.')
+            return False
         # openpyxl은 엑셀 저장에만 필요하므로 이때 불러온다.
         from .excel import write_workbook
         try:
@@ -1547,6 +2380,12 @@ class MainWindow(QMainWindow):
         self._migrate_settings()
         self.workspaces = [WorkspaceWindow(_ModeSettings(self.settings, 'actual')),
                            WorkspaceWindow(_ModeSettings(self.settings, 'planning'), planning=True)]
+        self.history = GlobalHistory()
+        for workspace in self.workspaces:
+            workspace.history_committed.connect(
+                lambda session, label, before, after, workspace=workspace:
+                self.history.record(workspace, session, label, (before, after), self.workspaces))
+            workspace.history_invalidated.connect(self.clear_history)
         self.actual, self.plan = self.workspaces
         self.mode_stack = QStackedWidget()
         for workspace in self.workspaces:
@@ -1572,9 +2411,9 @@ class MainWindow(QMainWindow):
         self.mode_corner = mode_corner  # 코너 위젯의 C++ 수명을 창과 함께 유지한다.
         file_menu = self.menuBar().addMenu('파일')
         for label, key, callback in (
-                ('새로 만들기', QKeySequence.New, lambda: self.active_workspace.new_all()),
+                ('새로 만들기', QKeySequence.New, lambda: self.active_workspace.browse_new()),
                 ('불러오기', QKeySequence.Open, lambda: self.active_workspace.browse_import()),
-                ('저장', QKeySequence.Save, self.save_current),
+                ('저장 위치 지정', None, lambda: self.active_workspace.browse_bind_sources()),
                 ('실적 파일에서 계획 준비', None, self.prepare_current),
                 ('내보내기', 'Ctrl+Shift+S', lambda: self.active_workspace.browse_export()),
                 ('종료', QKeySequence.Quit, self.close)):
@@ -1585,6 +2424,19 @@ class MainWindow(QMainWindow):
             file_menu.addAction(action)
             if label == '실적 파일에서 계획 준비':
                 self.prepare_action = action
+        edit_menu = self.menuBar().addMenu('편집')
+        self.undo_action = QAction('실행 취소', self)
+        self.undo_action.setShortcut(QKeySequence('Ctrl+Z'))
+        self.undo_action.triggered.connect(lambda: self.move_history(-1, keyboard=True))
+        edit_menu.addAction(self.undo_action)
+        self.redo_action = QAction('다시 실행', self)
+        self.redo_action.setShortcut(QKeySequence('Ctrl+Y'))
+        self.redo_action.triggered.connect(lambda: self.move_history(1, keyboard=True))
+        edit_menu.addAction(self.redo_action)
+        self.undo_menu = edit_menu.addMenu('실행 취소 이력')
+        self.redo_menu = edit_menu.addMenu('다시 실행 이력')
+        self.undo_menu.aboutToShow.connect(lambda: self.populate_history_menu(False))
+        self.redo_menu.aboutToShow.connect(lambda: self.populate_history_menu(True))
         mode_menu = self.menuBar().addMenu('작업')
         for index, label in enumerate(('실적작업', '계획작업')):
             action = QAction(label, self)
@@ -1600,13 +2452,112 @@ class MainWindow(QMainWindow):
             view_menu.addAction(action)
         self.resize(1280, 850)
         self.set_mode(self.settings.value('work_mode', self.ACTUAL, type=int))
+        theme.apply_window_theme(self)
+        QApplication.instance().paletteChanged.connect(self._apply_main_theme)
+
+    def _apply_main_theme(self):
+        if getattr(self, '_theme_applying', False):
+            return
+        self._theme_applying = True
+        try:
+            theme.apply_window_theme(self)
+            for workspace in self.workspaces:
+                workspace.apply_theme_styles()
+        finally:
+            self._theme_applying = False
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.ApplicationPaletteChange and hasattr(self, 'workspaces'):
+            self._apply_main_theme()
 
     @property
     def active_workspace(self):
         return self.workspaces[self.mode_stack.currentIndex()]
 
+    def clear_history(self):
+        if self.history.entries:
+            self.history.clear()
+            self.statusBar().showMessage('원본 문서가 바뀌어 이전 실행 이력을 정리했습니다.')
+
+    def populate_history_menu(self, redo=False):
+        menu = self.redo_menu if redo else self.undo_menu
+        menu.clear()
+        labels = self.history.labels(redo)
+        revision = self.history.revision
+        for index, label in enumerate(labels[:20], 1):
+            action = menu.addAction(f'{index}. {label[:60]}')
+            action.triggered.connect(lambda checked=False, n=index, rev=revision:
+                                     self.move_history(n if redo else -n, revision=rev))
+        if len(labels) > 20:
+            action = menu.addAction('더 보기…')
+            action.triggered.connect(lambda checked=False, rev=revision:
+                                     self.more_history(redo, len(labels), rev))
+        if not labels:
+            menu.addAction('(이력 없음)').setEnabled(False)
+
+    def more_history(self, redo, total, revision):
+        labels = self.history.labels(redo)
+        if revision != self.history.revision or len(labels) != total:
+            self.statusBar().showMessage('이력이 변경되어 메뉴를 다시 열어야 합니다.')
+            return
+        choices = [f'{index}. {label[:60]}' for index, label in enumerate(labels, 1)]
+        choice, ok = QInputDialog.getItem(self, '이력 이동', '이동할 마지막 작업:', choices, 20, False)
+        if ok:
+            count = int(choice.split('.', 1)[0])
+            self.move_history(count if redo else -count, revision=revision)
+
+    def move_history(self, delta, *, keyboard=False, revision=None):
+        focus = QApplication.focusWidget()
+        if keyboard and isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return False
+        if focus is not None and self.isAncestorOf(focus):
+            focus.clearFocus()
+        for workspace in self.workspaces:
+            if not workspace.flush_autosave():
+                return False
+        if revision is not None and revision != self.history.revision:
+            self.statusBar().showMessage('이력이 변경되어 메뉴를 다시 열어야 합니다.')
+            return False
+        target = self.history.cursor + delta
+        if not delta or not 0 <= target <= len(self.history.entries):
+            return False
+        group = (self.history.entries[target:self.history.cursor] if delta < 0
+                 else self.history.entries[self.history.cursor:target])
+        affected = {entry.workspace for entry in group}
+        for workspace in affected:
+            workspace.set_save_status('저장 중')
+        try:
+            entry = self.history.move(delta)
+        except (OSError, UnicodeError, ValueError, TypeError, DocumentError) as exc:
+            if '원본 복구 실패' in str(exc):
+                for workspace in affected:
+                    workspace.block_history_writes()
+            for workspace in affected:
+                workspace.save_failure_status(exc)
+            self.active_workspace.warn('이력 저장 실패', str(exc))
+            return False
+        for workspace in affected:
+            workspace.restore_history_state()
+        context = entry.context[0 if delta < 0 else 1]
+        self.set_mode(self.workspaces.index(entry.workspace))
+        entry.workspace.restore_history_state(context)
+        self.statusBar().showMessage(f'{abs(delta)}개 작업 이력 이동 완료')
+        return True
+
     def set_mode(self, mode):
         mode = mode if mode in (self.ACTUAL, self.PLANNING) else self.ACTUAL
+        current = self.mode_stack.currentIndex()
+        if current != mode and current >= 0:
+            workspace = self.workspaces[current]
+            focus = QApplication.focusWidget()
+            if focus is not None and workspace.isAncestorOf(focus):
+                focus.clearFocus()
+            if not workspace.flush_autosave():
+                self.mode_combo.blockSignals(True)
+                self.mode_combo.setCurrentIndex(current)
+                self.mode_combo.blockSignals(False)
+                return
         self.mode_stack.setCurrentIndex(mode)
         self.mode_combo.blockSignals(True)
         self.mode_combo.setCurrentIndex(mode)
@@ -1620,10 +2571,6 @@ class MainWindow(QMainWindow):
         if not workspace.planning:
             return
         workspace.browse_prepare_plan()
-
-    def save_current(self):
-        workspace = self.active_workspace
-        return workspace.browse_save_plan() if workspace.planning else workspace.browse_export()
 
     def change_font_size(self, step):
         size = self.active_workspace.font_size + step if step else DEFAULT_FONT_SIZE
@@ -1660,6 +2607,11 @@ class MainWindow(QMainWindow):
         original = self.mode_stack.currentIndex()
         for index, workspace in enumerate(self.workspaces):
             self.set_mode(index)
+            if workspace._autosave_blocked:
+                if not workspace.confirm('복구 필요', '파일 복구에 실패했습니다. 안내된 복구 파일을 보존한 뒤 종료할까요?'):
+                    event.ignore()
+                    return
+                continue
             if not workspace.keep_all('계획작업' if workspace.planning else '실적작업'):
                 event.ignore()
                 return

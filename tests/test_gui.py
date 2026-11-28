@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import yaml
@@ -50,6 +51,13 @@ class GuiTests(unittest.TestCase):
         self.confirm_answer = True
         self.export_folders = []  # 내보내기 폴더 대화상자에 줄 경로
         self.year_answers = []  # 연도 추가 대화상자에 줄 연도
+        self.source_counter = 0
+        def choose_temp(_window, kind, year, sources):
+            self.source_counter += 1
+            return str(self.path / f'auto_{kind}_{year}_{self.source_counter}.yaml')
+        patcher = patch.object(WorkspaceWindow, 'choose_source_path', choose_temp)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def window(self, planning=False):
         window = WorkspaceWindow(self.settings, planning=planning)
@@ -66,7 +74,7 @@ class GuiTests(unittest.TestCase):
         menus = {action.text(): action.menu() for action in w.menuBar().actions()}
         actions = menus['파일'].actions()
         self.assertEqual([action.text() for action in actions],
-                         ['새로 만들기', '불러오기', '내보내기', '종료'])
+                         ['새로 만들기', '불러오기', '저장 위치 지정', '내보내기', '종료'])
         w.show()
         w.keep_all = lambda: False
         actions[-1].trigger()
@@ -74,6 +82,46 @@ class GuiTests(unittest.TestCase):
         w.keep_all = lambda: True
         actions[-1].trigger()
         self.assertFalse(w.isVisible())
+
+    def test_import_preserves_project_file_metadata_for_safe_merge(self):
+        from allocation.document import dump_projects, read_projects
+        first = self.path / 'first.yaml'
+        second = self.path / 'second.yaml'
+        first.write_text('metadata: {owner: "001"}\nprojects: []\n', encoding='utf-8')
+        second.write_text('projects: []\n', encoding='utf-8')
+        w = self.window()
+        errors, dropped = w.import_files([str(first)])
+        self.assertEqual((errors, dropped), ([], []))
+        self.assertEqual(read_projects(dump_projects(w.project_editor.projects))[0].metadata, {'owner': '001'})
+        errors, _ = w.import_files([str(second)])
+        self.assertFalse(errors)
+        self.assertEqual(w.project_editor.projects.metadata['prouman_source_metadata'][0]['metadata'], {'owner': '001'})
+        self.assertEqual(first.read_text(encoding='utf-8'), 'metadata: {owner: "001"}\nprojects: []\n')
+
+    def test_numeric_paste_rejects_whole_mixed_range(self):
+        from allocation.editor import EditTable
+        table = EditTable(['수량1', '수량2'])
+        table.set_numeric_columns('decimal', 0, 1)
+        table.setRowCount(1)
+        table.set_cell(0, 0, '1')
+        table.set_cell(0, 1, '2')
+        table.setCurrentCell(0, 0)
+        table.paste('0.5\t잘못된 값')
+        self.assertEqual([table.item(0, c).text() for c in range(2)], ['1', '2'])
+        table.paste('0.123456\t0.')
+        self.assertEqual([table.item(0, c).text() for c in range(2)], ['0.123456', '0.'])
+
+    def test_numeric_editor_blocks_letters_but_allows_incomplete_decimal(self):
+        from allocation.editor import EditTable
+        from PySide6.QtWidgets import QLineEdit, QStyleOptionViewItem
+        table = EditTable(['수량'])
+        table.set_numeric_columns('decimal', 0)
+        table.setRowCount(1)
+        table.set_cell(0, 0, '')
+        editor = table.itemDelegateForColumn(0).createEditor(table, QStyleOptionViewItem(), table.model().index(0, 0))
+        self.assertIsInstance(editor, QLineEdit)
+        QTest.keyClicks(editor, '0.a')
+        self.assertEqual(editor.text(), '0.')
 
     def test_P08_P09_P10_plan_screen_save_reopen_confirm(self):
         from allocation.document import PlanDoc, PlanPersonEntry, dump_plan
@@ -101,7 +149,7 @@ class GuiTests(unittest.TestCase):
         w.planning_page.matrix.item(0, 1).setText('0.70000')
         self.assertEqual(w.planning_page.matrix.item(0, 2).text(), '0.40000')
         self.assertFalse(w.planning_page.confirm_button.isEnabled())
-        self.assertTrue(w.save_plan(self.path))
+        self.assertTrue(w.save_plan(self.path / 'draft-copy'))
         self.assertIn('0.70000', plan_path.read_text(encoding='utf-8'))
         self.assertFalse(w.confirm_plan(self.path))
         self.assertFalse((self.path / 'people' / 'people_2027.yaml').exists())
@@ -117,7 +165,7 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(second.confirm_plan(output))
         confirmed = output / 'people' / 'people_2027.yaml'
         self.assertIn('stage: confirmed', confirmed.read_text(encoding='utf-8'))
-        self.assertIn('0.70000', plan_path.read_text(encoding='utf-8'))
+        self.assertIn('0.60000', plan_path.read_text(encoding='utf-8'))
         inputs, issues = load_inputs(output / 'projects.yaml', confirmed)
         self.assertIsNotNone(inputs, issues)
         self.assertFalse(calculate(inputs, issues).has_errors)
@@ -446,12 +494,12 @@ class GuiTests(unittest.TestCase):
 
         # 2) 실시간 저장 실패 시 메모리 fixed가 원래 상태로 롤백된다.
         before = dict(w.people_docs['2027'].people[0].fixed)
-        with patch.object(w, 'write_yaml_jobs', return_value=False):
+        with patch('allocation.autosave.storage.write_bundle', side_effect=OSError('저장 실패')):
             self.assertFalse(w.toggle_project_pin('홍길동', '사업1'))
         self.assertEqual(w.people_docs['2027'].people[0].fixed, before)
         self.assertEqual(w.project_pin_info('홍길동', '사업1')[0], 'fixed')
 
-        # 3) 단일 원본 파일이 없는 새 문서에서는 메모리에만 반영하고 dirty=True 및 안내를 표시한다.
+        # 3) 원본 없는 문서는 선택한 새 파일에 고정을 저장한다.
         fresh = WorkspaceWindow(QSettings(str(self.path / 'fresh_pin.ini'), QSettings.IniFormat))
         fresh.warn = lambda title, text: self.warnings.append((title, text))
         self.addCleanup(fresh.deleteLater)
@@ -464,24 +512,50 @@ class GuiTests(unittest.TestCase):
         fresh.generate()
         self.assertTrue(fresh.toggle_project_pin('새 사람', '사업1'))
         self.assertIn('사업1', fresh.people_docs[year].people[0].fixed)
-        self.assertTrue(fresh.people_dirty[year])
-        self.assertIn('메모리에만 반영', fresh.statusBar().currentMessage())
+        self.assertFalse(fresh.people_dirty[year])
+        self.assertTrue(Path(fresh.people_sources[year][0]).exists())
 
-        # 4) 같은 연도 사람 파일 2개를 합쳐 불러온 경우에도 임의 파일에 덮어쓰지 않고 메모리에만 반영한다.
+        # 4) 두 원본은 보존하고 고정 변경을 선택한 새 통합 파일에 저장한다.
         h2 = self.path / 'people' / 'people_extra.yaml'
         h2.write_text(yaml.safe_dump({'year': 2027, 'people': [person({'사업2': '1'}, name='이영희')]},
                                      allow_unicode=True, sort_keys=False), encoding='utf-8')
         before_h, before_h2 = h.read_bytes(), h2.read_bytes()
         errors, _ = w.import_files([str(h2)])
         self.assertEqual(errors, [])
+        w.choose_output_encoding = lambda path, key, interactive: 'utf-8'
         w.set_people_dirty('2027', False)
         w.generate()
         self.assertTrue(w.toggle_person_pin('이영희'))
         self.assertIn('사업2', w.people_docs['2027'].people[1].fixed)
-        self.assertTrue(w.people_dirty['2027'])
+        self.assertFalse(w.people_dirty['2027'])
         self.assertEqual(h.read_bytes(), before_h)
         self.assertEqual(h2.read_bytes(), before_h2)
-        self.assertIn('메모리에만 반영', w.statusBar().currentMessage())
+        self.assertTrue(Path(w.people_sources['2027'][0]).exists())
+
+    def test_pin_rejects_external_changes(self):
+        p, h = self.write([project()], [person({'사업1': '1'})])
+        w = self.window()
+        self.assertEqual(w.import_files([str(p), str(h)])[0], [])
+        w.generate()
+        external = h.read_text(encoding='utf-8') + '\n# 외부 편집\n'
+        h.write_text(external, encoding='utf-8')
+        self.assertFalse(w.toggle_project_pin('홍길동', '사업1'))
+        self.assertEqual(h.read_text(encoding='utf-8'), external)
+        self.assertFalse(w.people_docs['2027'].people[0].fixed)
+        self.assertTrue(any('외부' in text for _, text in self.warnings))
+
+    def test_pin_rejects_unrecognized_source_fields(self):
+        p, h = self.write([project()], [person({'사업1': '1'})])
+        content = h.read_text(encoding='utf-8') + '\nunsupported_field: keep\n'
+        h.write_text(content, encoding='utf-8')
+        w = self.window()
+        errors, dropped = w.import_files([str(p), str(h)])
+        self.assertFalse(errors)
+        self.assertTrue(dropped)
+        w.generate()
+        self.assertFalse(w.toggle_project_pin('홍길동', '사업1'))
+        self.assertEqual(h.read_text(encoding='utf-8'), content)
+        self.assertTrue(any('metadata' in text for _, text in self.warnings))
 
     def test_people_input_list_pin_status_readonly_sync_and_drag(self):
         from PySide6.QtCore import QPoint
@@ -715,7 +789,7 @@ class GuiTests(unittest.TestCase):
         view.selectAll()
         self.assertEqual(view.copy_selection(), expected)
         self.assertNotEqual(dump_people(w.people_editor.doc), original_doc)
-        self.assertNotEqual(w.people_dirty, original_dirty)
+        self.assertEqual(w.people_dirty, original_dirty)  # 단일 원본은 순서 변경을 자동 저장한다.
         requested = []
         w.people_editor.overview.person_requested.connect(requested.append)
         QTest.mouseDClick(view.viewport(), Qt.LeftButton, Qt.NoModifier,
@@ -849,7 +923,7 @@ class GuiTests(unittest.TestCase):
         self.app.processEvents()
         self.drag_label_row(w.project_editor.table, 0, 1)
         self.assertEqual([p.alias for p in w.project_editor.projects], ['사업2', '사업1'])
-        self.assertTrue(w.projects_dirty)
+        self.assertFalse(w.projects_dirty)  # 드래그 완료 후 원본 자동 저장
         overview = w.people_editor.overview.matrix
         self.assertEqual([overview.horizontalHeaderItem(overview.horizontalHeader().logicalIndex(v)).text()
                           for v in (1, 2)], ['사업2', '사업1'])
@@ -863,7 +937,7 @@ class GuiTests(unittest.TestCase):
         QTest.mouseRelease(people.viewport(), Qt.LeftButton, Qt.NoModifier, second)
         self.app.processEvents()
         self.assertEqual([p.name for p in w.people_editor.doc.people], ['김철수', '홍길동'])
-        self.assertTrue(w.people_dirty['2027'])
+        self.assertFalse(w.people_dirty['2027'])
         self.assertEqual([overview.item(r, 0).text() for r in range(2)], ['김철수', '홍길동'])
         self.assertEqual([overview.horizontalHeaderItem(c).text() for c in (1, 2)], ['사업2', '사업1'])
         self.assertEqual([overview.item(overview.verticalHeader().logicalIndex(v), 0).text()
@@ -1095,7 +1169,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(editor.people_list.item(0).toolTip(), '')
         w.generate()
         self.assertTrue(w.excel_button.isEnabled())
-        self.assertIn('0.60000', h.read_text(encoding='utf-8'))  # 저장하기 전에는 파일이 그대로다.
+        self.assertEqual(yaml.safe_load(h.read_text(encoding='utf-8'))['people'][0]['allocations']['사업1'], '0.5')
 
         # 형식이 틀린 값은 칸을 표시하고 안내를 띄운다. 빈 참여율도 안내하고, 행 삭제로 사업을 뺀다.
         alloc.item(0, 1).setText('0.5.1')
@@ -1264,13 +1338,8 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(inputs.people['이영희'].targets, {'새사업': 100000})
         self.assertFalse((folder / 'projects.yaml.bak').exists())
 
-        # 내보내지 않은 변경이 있으면 새로 만들기 전에 묻는다.
+        # 단일 원본은 종료 전에 저장되어 별도 저장 질문이 없다.
         me.allocations.item(0, 1).setText('0.9')
-        self.export_answers = ['cancel']
-        w.new_all()
-        self.assertEqual(w.people_editor.doc.people[0].allocations['새사업'], '0.9')
-        self.assertEqual(len(w.project_editor.projects), 1)
-        self.export_answers = ['discard']
         w.new_all()
         self.assertEqual(w.project_editor.projects, [])
         self.assertEqual(w.people_editor.doc.people, [])
@@ -1787,22 +1856,17 @@ class GuiTests(unittest.TestCase):
         w.add_year()
         w.people_editor.add_person()
         w.people_editor.people_list.item(0).setText('김신입')
-        self.export_answers = ['cancel']
-        w.close_year()
-        self.assertIn('2032', w.people_docs)
-        self.assertEqual(len(w.people_docs['2032'].people), 1)
-        self.export_answers = ['discard']
         w.close_year()
         self.assertNotIn('2032', w.people_docs)
         self.assertEqual(w.current_year, today)
         w.close_year()
         self.assertEqual(len(w.people_docs), 1)
-        # 새로 만들기에서 내보내기를 고르면 쓰고 나서 비운다.
+        # 새 문서의 첫 편집은 선택한 원본에 저장된 뒤 비운다.
         w.people_editor.add_person()
-        self.export_answers = ['export']
-        self.export_folders = [str(self.path / 'exp')]
+        self.assertTrue(w.flush_autosave())
+        saved_path = Path(w.people_sources[today][0])
         w.new_all()
-        self.assertTrue((self.path / 'exp' / 'people' / f'people_{today}.yaml').is_file())
+        self.assertTrue(saved_path.is_file())
         self.assertEqual(w.people_editor.doc.people, [])
         self.assertEqual(w.project_editor.projects, [])
 
@@ -1955,26 +2019,59 @@ class ThemeTests(unittest.TestCase):
                     # 아이콘 픽셀이 실제로 그려졌는지 확인한다.
                     self.assertTrue(any(image.pixel(x, y) != 0 for x in range(24) for y in range(24)))
 
-    def test_T29_selection_follows_system_highlight(self):
-        # 선택 배경은 시스템 강조색이라 어떤 테마에서도 어울리고,
-        # 글자는 강조 글자색이라 배경과 대비된다.
+    def test_people_list_selection_uses_same_background_when_inactive(self):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QImage, QPainter
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        from allocation.editor import OrderedPeopleList
+
+        view = OrderedPeopleList()
+        view.addItem('홍길동')
+        view.set_pin_provider(lambda _: ('fixed', ''))
+        for dark in (False, True):
+            for active in (False, True):
+                option = QStyleOptionViewItem()
+                option.initFrom(view)
+                option.rect = QRect(0, 0, 180, 30)
+                option.state |= QStyle.State_Selected | QStyle.State_Enabled
+                if active:
+                    option.state |= QStyle.State_Active | QStyle.State_HasFocus
+                else:
+                    option.state &= ~(QStyle.State_Active | QStyle.State_HasFocus)
+                image = QImage(180, 30, QImage.Format_ARGB32)
+                image.fill(0)
+                painter = QPainter(image)
+                try:
+                    self.themed(dark, view.itemDelegate().paint, painter, option, view.model().index(0, 0))
+                finally:
+                    painter.end()
+                expected = theme.DARK if dark else theme.LIGHT
+                self.assertEqual(image.pixelColor(175, 15).name(), expected['list_selection'].lower())
+        view.close()
+
+    def test_T29_selection_uses_theme_and_high_contrast_palette(self):
+        # 일반 선택은 명세 색상, 고대비는 사용자의 시스템 강조색을 따른다.
         from PySide6.QtGui import QPalette
         palette = self.app.palette()
-        self.assertEqual(theme.selection_color().name(), palette.color(QPalette.Highlight).name())
-        self.assertEqual(theme.selected_text_color().name(), palette.color(QPalette.HighlightedText).name())
-        self.assertNotEqual(theme.selection_color().name(), theme.selected_text_color().name())
+        with patch.object(theme, 'high_contrast_active', return_value=False):
+            self.assertEqual(self.themed(False, theme.selection_color).name(), '#cfe4fa')
+            self.assertEqual(self.themed(True, theme.selection_color).name(), '#264f78')
+        with patch.object(theme, 'high_contrast_active', return_value=True):
+            self.assertEqual(theme.selection_color().name(), palette.color(QPalette.Highlight).name())
+            self.assertEqual(theme.selected_text_color().name(), palette.color(QPalette.HighlightedText).name())
 
     def test_T29_nav_stylesheet_uses_palette(self):
-        # 좌측 메뉴: 배경·글자·선택이 시스템 팔레트에서 나온다.
-        # 예전처럼 밝은 배경에 흰 글자(안 보임)가 되지 않는다.
+        # 일반 모드와 고대비 모두 선택 배경과 글자를 같은 정책에서 구한다.
         from PySide6.QtGui import QPalette
-        sheet = theme.nav_stylesheet()
         palette = self.app.palette()
-        for role in (QPalette.Window, QPalette.WindowText, QPalette.Highlight, QPalette.HighlightedText):
-            self.assertIn(palette.color(role).name(), sheet)
-        checked_bg = palette.color(QPalette.Highlight).name()
-        checked_text = palette.color(QPalette.HighlightedText).name()
-        self.assertIn(f'QToolButton:checked {{ background-color: {checked_bg}; color: {checked_text};', sheet)
+        with patch.object(theme, 'high_contrast_active', return_value=False):
+            sheet = theme.nav_stylesheet()
+            self.assertIn(theme.selection_color().name(), sheet)
+            self.assertIn(theme.selected_text_color().name(), sheet)
+        with patch.object(theme, 'high_contrast_active', return_value=True):
+            sheet = theme.nav_stylesheet()
+            for role in (QPalette.Window, QPalette.WindowText, QPalette.Highlight, QPalette.HighlightedText):
+                self.assertIn(palette.color(role).name(), sheet)
 
     def test_T29_legend_text_contrasts(self):
         # 범례 칩은 글자색을 함께 지정한다. 밝은 칩에 검은 글자, 어두운 칩에 흰 글자.

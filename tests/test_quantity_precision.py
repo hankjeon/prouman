@@ -42,6 +42,48 @@ people:
 
 
 class QuantityPrecisionTests(unittest.TestCase):
+    def test_yaml_number_deepcopy_preserves_kind_and_precision(self):
+        from copy import deepcopy
+        from allocation.loading import Loader
+        import yaml
+        value = yaml.load('0.12345678901234567890', Loader=Loader)
+        copied = deepcopy(value)
+        self.assertEqual(str(copied), '0.12345678901234567890')
+        self.assertEqual(copied.kind, 'float')
+
+    def test_metadata_roundtrip_and_calculation_ignores_it(self):
+        from allocation.document import plan_from_people
+        project_text = PROJECTS.replace('projects:', 'metadata: {owner: "001"}\nprojects:').replace(
+            'alias: 사업1', 'alias: 사업1\n    metadata: {precision: 0.12345678901234567890}').replace('LIMIT', '1')
+        people_text = PEOPLE.replace('year: 2027', 'year: 2027\nmetadata: {shared: true}').replace(
+            'name: 홍길동', 'name: 홍길동\n    metadata: {tags: ["001", false, null]}').replace('VALUE', '1')
+        projects, dropped = read_projects(project_text)
+        people, dropped_people = read_people(people_text)
+        self.assertEqual((dropped, dropped_people), ([], []))
+        project_output, people_output = dump_projects(projects), dump_people(people)
+        self.assertIn('0.12345678901234567890', project_output)
+        again, _ = read_projects(project_output)
+        self.assertEqual(again[0].metadata['precision'].kind, 'float')
+        self.assertEqual(again.metadata['owner'], '001')
+        self.assertEqual(read_people(people_output)[0].people[0].metadata['tags'], ['001', False, None])
+        result, issues = load_inputs('p', 'h', {'projects': project_output, 'people': people_output})
+        self.assertIsNotNone(result, issues)
+        plan = plan_from_people(people, '2027')
+        restored = read_plan(dump_plan(plan))
+        self.assertEqual(restored.metadata, people.metadata)
+        self.assertEqual(restored.people[0].metadata, people.people[0].metadata)
+
+    def test_metadata_rejects_duplicates_unsafe_tags_and_cycles(self):
+        from allocation.document import DocumentError
+        for metadata in ('{x: 1, x: 2}', '{x: !!python/object/apply:os.system ["echo unsafe"]}'):
+            text = PEOPLE.replace('year: 2027', 'year: 2027\nmetadata: ' + metadata).replace('VALUE', '1')
+            with self.subTest(metadata=metadata), self.assertRaises(DocumentError):
+                read_people(text)
+        cyclic = {}
+        cyclic['self'] = cyclic
+        with self.assertRaises(DocumentError):
+            dump_people(PeopleDoc('2027', [], metadata=cyclic))
+
     def load_field(self, field, literal):
         projects = PROJECTS.replace('LIMIT', literal if field == 'budget' else '"1"')
         if field in ('budget', 'actual', 'fixed'):
