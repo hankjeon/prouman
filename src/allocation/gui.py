@@ -6,6 +6,7 @@ import hashlib
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+import yaml
 
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, QSettings, QSize, Qt, Signal, QTimer,
                             qInstallMessageHandler)
@@ -29,6 +30,7 @@ from .planning_gui import PlanningPage
 from .storage import write_bundle
 from .text_encoding import ENCODINGS, decode_yaml, encode_yaml
 from .encoding_ui import choose_files, choose_folder
+from .yaml_editor import YamlEditorPanel, extract_error_line
 from .rendering import issue_counts, project_summary
 from .tables import (issue_table, people_summary_table, person_detail_table, project_people_table,
                      project_summary_table)
@@ -310,7 +312,7 @@ class WorkspaceWindow(QMainWindow):
 
     결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
 
-    INPUT_PAGE, RESULT_PAGE = 0, 1
+    INPUT_PAGE, RESULT_PAGE, YAML_PAGE = 0, 1, 2
     PROJECTS_TAB, PEOPLE_TAB, OVERVIEW_TAB = 0, 1, 2  # input_tabs
     ISSUES_TAB, SUMMARY_TAB = 0, 1  # result_tabs
     history_committed = Signal(object, str, object, object)
@@ -354,6 +356,7 @@ class WorkspaceWindow(QMainWindow):
         self._copy_backed_up = set()
         self._import_depth = 0
         self._unsupported_sources = set()
+        self._last_page = self.INPUT_PAGE
         try:
             choices = json.loads(self.settings.value('read_encodings', '{}'))
             self.read_encodings = {key: value for key, value in choices.items()
@@ -400,8 +403,13 @@ class WorkspaceWindow(QMainWindow):
         self.project_editor.before_change.connect(self._capture_autosave_selection)
         self.project_editor.alias_renamed.connect(self.alias_renamed)
         self.project_editor.alias_removed.connect(self.remove_alias_everywhere)
+        self.project_editor.open_yaml_requested.connect(lambda name: self.open_yaml_for('projects', name))
         self.people_editor.changed.connect(self.people_changed)
         self.people_editor.before_change.connect(self._capture_autosave_selection)
+        self.people_editor.open_yaml_requested.connect(
+            lambda name: self.open_yaml_for('people:' + str(self.current_year), name))
+        self.planning_page.open_yaml_requested.connect(
+            lambda name: self.open_yaml_for('plan:' + str(self.current_year), name))
         self.people_editor.overview.projects_order_requested.connect(self.project_editor.reorder_projects)
         self.input_tabs = QTabWidget()
         self.input_tabs.addTab(self.project_editor, '사업 입력')
@@ -470,12 +478,16 @@ class WorkspaceWindow(QMainWindow):
         layout.addLayout(header)
         layout.addWidget(self.result_tabs)
 
-        # 각 업무는 입력·결과 두 탭만 사용한다. 작업 모드 전환은 바깥 창이 맡는다.
-        # 입력·결과 전환은 좌측 세로(서쪽) 탭으로 둔다.
+        # 각 업무는 입력·결과·YAML 편집 탭을 사용한다. 작업 모드 전환은 바깥 창이 맡는다.
+        # 탭 전환은 좌측 세로(서쪽) 탭으로 둔다.
+        self.yaml_panel = YamlEditorPanel(self)
+        self.yaml_panel.dirty_changed.connect(lambda _dirty: self.refresh_marks())
+        self.yaml_panel.zoom_requested.connect(self.change_font_size)
         self.pages = QTabWidget()
         self.pages.setTabPosition(QTabWidget.West)
         self.pages.addTab(input_page, '입력')
         self.pages.addTab(self.planning_page if planning else result_page, '결과')
+        self.pages.addTab(self.yaml_panel, 'YAML 편집')
         if planning:
             result_page.setParent(self)
             result_page.hide()
@@ -552,6 +564,8 @@ class WorkspaceWindow(QMainWindow):
         font = QFont(self.font())
         font.setPointSize(self.font_size)
         self.setFont(font)
+        if hasattr(self, 'yaml_panel'):
+            self.yaml_panel.set_font_size(self.font_size)
         if save:
             self.settings.setValue('font_size', self.font_size)
 
@@ -567,22 +581,48 @@ class WorkspaceWindow(QMainWindow):
         self.input_tabs.setCurrentIndex(self.PEOPLE_TAB)
         self.people_editor.select_person(row)
 
+    def confirm_leave_yaml(self):
+        """YAML 편집기에 미저장 변경이 있으면 저장·버리기·취소를 묻는다."""
+        if not hasattr(self, 'yaml_panel') or not self.yaml_panel.has_dirty():
+            return True
+        return self.yaml_panel.confirm_leave_all()
+
+    def open_yaml_for(self, key, target_name=''):
+        """표 편집기에서 선택한 사업/사람 위치로 YAML 편집 탭을 연다."""
+        self.show_page(self.YAML_PAGE)
+        if self.pages.currentIndex() == self.YAML_PAGE:
+            self.yaml_panel.jump_to_item(key, target_name)
+
     def show_page(self, page):
-        """결과 화면으로 가면 입력 화면의 현재 내용을 바로 계산해 보여 준다."""
-        if page == self.RESULT_PAGE:
+        """입력·결과·YAML 편집 화면을 전환한다."""
+        if getattr(self, '_last_page', self.INPUT_PAGE) == self.YAML_PAGE and page != self.YAML_PAGE:
+            if not self.confirm_leave_yaml():
+                self.pages.blockSignals(True)
+                self.pages.setCurrentIndex(self.YAML_PAGE)
+                self.pages.blockSignals(False)
+                return
+        if page in (self.RESULT_PAGE, self.YAML_PAGE):
             focus = QApplication.focusWidget()
             if focus is not None and self.isAncestorOf(focus):
                 focus.clearFocus()
             if not self.flush_autosave():
+                if page == self.YAML_PAGE:
+                    self.pages.blockSignals(True)
+                    self.pages.setCurrentIndex(self._last_page)
+                    self.pages.blockSignals(False)
                 return
         if page == self.RESULT_PAGE and not self.planning:
             self.generate()
+            self._last_page = self.pages.currentIndex()
             return
         if self.planning and page == self.RESULT_PAGE:
             self.planning_page.refresh_review()
+        if page == self.YAML_PAGE:
+            self.yaml_panel.sync_from_workspace(preserve_dirty=True)
         self.pages.blockSignals(True)
         self.pages.setCurrentIndex(page)
         self.pages.blockSignals(False)
+        self._last_page = page
 
     def show_result_header(self, extra=''):
         if self.generated_at is None:
@@ -609,6 +649,7 @@ class WorkspaceWindow(QMainWindow):
         self.project_editor.apply_theme()
         self.people_editor.apply_theme()
         self.planning_page.refresh_review()
+        self.yaml_panel.apply_theme()
         fresh = severity_colors()
         for view in (self.issue_view, self.people_summary_view, self.project_summary_view,
                      self.person_view, self.project_people_view):
@@ -715,6 +756,127 @@ class WorkspaceWindow(QMainWindow):
                     self.person_list.setCurrentItem(matches[0])
         finally:
             self._autosave_restoring = False
+        if hasattr(self, 'yaml_panel'):
+            self.yaml_panel.sync_from_workspace(preserve_dirty=False)
+
+    def apply_and_save_yaml(self, key, text):
+        """YAML 편집기 텍스트를 파싱·검증한 뒤 문서에 반영하고 원본에 저장한다."""
+        if any('\t' in line for line in text.splitlines()):
+            line_no = next(i for i, line in enumerate(text.splitlines(), 1) if '\t' in line)
+            self.warn('YAML 저장 실패', f'{line_no}번째 줄: YAML에서는 탭 문자(\\t) 대신 공백을 사용해야 합니다.')
+            self.yaml_panel.editor.jump_to_line(line_no)
+            return False
+        try:
+            if key == 'projects':
+                new_doc, dropped = read_projects(text)
+                if dropped:
+                    raise ValueError('지원하지 않는 YAML 항목이 있어 저장할 수 없습니다: ' + ', '.join(dropped))
+                canonical = dump_projects(new_doc)
+                current_canonical = dump_projects(self.project_editor.projects)
+            elif key.startswith('people:'):
+                year = key.split(':', 1)[1]
+                new_doc, dropped = read_people(text)
+                if dropped:
+                    raise ValueError('지원하지 않는 YAML 항목이 있어 저장할 수 없습니다: ' + ', '.join(dropped))
+                if new_doc.year.strip() != year:
+                    raise ValueError(f'이 탭의 연도({year})와 YAML의 year({new_doc.year})가 다릅니다. '
+                                     '연도 변경은 연도 추가를 이용하세요.')
+                canonical = dump_people(new_doc)
+                current_canonical = dump_people(self.people_docs[year]) if year in self.people_docs else ''
+            elif key.startswith('plan:'):
+                year = key.split(':', 1)[1]
+                new_doc = read_plan(text)
+                if new_doc.year.strip() != year:
+                    raise ValueError(f'이 탭의 연도({year})와 YAML의 year({new_doc.year})가 다릅니다. '
+                                     '연도 변경은 연도 추가를 이용하세요.')
+                canonical = dump_plan(new_doc)
+                current_canonical = dump_plan(self.plan_docs[year]) if year in self.plan_docs else ''
+            else:
+                return False
+        except (DocumentError, yaml.YAMLError, ValueError) as exc:
+            msg = str(exc)
+            line_no = extract_error_line(msg)
+            if line_no is None and isinstance(exc, yaml.YAMLError) and getattr(exc, 'problem_mark', None):
+                line_no = exc.problem_mark.line + 1
+            self.warn('YAML 저장 실패', msg)
+            if line_no:
+                self.yaml_panel.editor.jump_to_line(line_no)
+            return False
+
+        if canonical == current_canonical:
+            self.yaml_panel.mark_saved(key, canonical)
+            self.statusBar().showMessage('변경된 내용이 없습니다.')
+            return True
+
+        old_snapshot = deepcopy(self._business_snapshot())
+        old_proj_dirty = self.projects_dirty
+        old_people_dirty = self.people_dirty.copy()
+        old_plan_dirty = self.plan_dirty.copy()
+        self._autosave_selection = (
+            self.current_year,
+            self.project_editor.current().alias if self.project_editor.current() else None,
+            (self.planning_page.current() if self.planning else self.people_editor.current()).name
+            if (self.planning_page.current() if self.planning else self.people_editor.current()) else None,
+            self.project_editor.table.currentColumn(),
+            self.planning_page.matrix.currentRow(),
+            self.planning_page.matrix.currentColumn(),
+        )
+        self._history_before = self.history_context()
+        self._history_action = 'YAML 편집'
+        try:
+            if key == 'projects':
+                self.project_editor.set_projects(new_doc)
+                self.people_editor.refresh()
+                self.planning_page.refresh()
+                self.projects_dirty = True
+                self._autosave_touched_projects = True
+            elif key.startswith('people:'):
+                year = key.split(':', 1)[1]
+                self.people_docs[year] = new_doc
+                if year == self.current_year:
+                    self.people_editor.blockSignals(True)
+                    self.people_editor.set_doc(new_doc)
+                    self.people_editor.blockSignals(False)
+                self.people_dirty[year] = True
+                self._autosave_touched_years.add(year)
+            else:
+                year = key.split(':', 1)[1]
+                self.plan_docs[year] = new_doc
+                if year == self.current_year:
+                    self.planning_page.set_doc(new_doc, self.plan_sources.get(year) or f'(새 {year} 계획)')
+                self.plan_dirty[year] = True
+                self._autosave_touched_years.add(year)
+
+            self._autosave_pending = True
+            ok = self.flush_autosave()
+        finally:
+            self._history_action = None
+
+        if not ok:
+            self._autosave_restoring = True
+            try:
+                old_projects, old_people, old_plans = old_snapshot
+                self.people_docs, self.plan_docs = old_people, old_plans
+                self.project_editor.set_projects(old_projects)
+                if self.current_year in self.people_docs:
+                    self.people_editor.blockSignals(True)
+                    self.people_editor.set_doc(self.people_docs[self.current_year])
+                    self.people_editor.blockSignals(False)
+                if self.current_year in self.plan_docs:
+                    self.planning_page.set_doc(self.plan_docs[self.current_year],
+                                               self.plan_sources.get(self.current_year) or f'(새 {self.current_year} 계획)')
+                self.projects_dirty = old_proj_dirty
+                self.people_dirty = old_people_dirty
+                self.plan_dirty = old_plan_dirty
+                self.refresh_marks()
+            finally:
+                self._autosave_restoring = False
+            return False
+
+        self.yaml_panel.sync_from_workspace(preferred_key=key, preserve_dirty=True)
+        self.yaml_panel.mark_saved(key, canonical)
+        self.statusBar().showMessage('YAML 저장 및 반영 완료')
+        return True
 
     def history_context(self):
         project = self.project_editor.current()
@@ -1027,6 +1189,8 @@ class WorkspaceWindow(QMainWindow):
         any_plan = any(self.plan_dirty.values())
         self.input_tabs.setTabText(self.PEOPLE_TAB, '사람 입력' + (' *' if (any_plan if self.planning else any_people) else ''))
         self.pages.setTabText(self.INPUT_PAGE, '입력' + (' *' if self.projects_dirty or (any_plan if self.planning else any_people) else ''))
+        yaml_dirty = hasattr(self, 'yaml_panel') and self.yaml_panel.has_dirty()
+        self.pages.setTabText(self.YAML_PAGE, 'YAML 편집' + (' *' if yaml_dirty else ''))
         self.refresh_year_combo()
         self.refresh_projects_label()
 
@@ -1367,6 +1531,8 @@ class WorkspaceWindow(QMainWindow):
 
     def keep_all(self, what='입력'):
         """내보내지 않은 변경을 처리한다. 진행해도 되면 True."""
+        if not self.confirm_leave_yaml():
+            return False
         focus = QApplication.focusWidget()
         if focus is not None and self.isAncestorOf(focus):
             focus.clearFocus()
@@ -1383,6 +1549,9 @@ class WorkspaceWindow(QMainWindow):
 
     def keep_year(self, year):
         """해당 연도의 변경을 처리한다. 진행해도 되면 True."""
+        prefix = 'plan:' if self.planning else 'people:'
+        if hasattr(self, 'yaml_panel') and not self.yaml_panel.confirm_leave_tab(prefix + str(year)):
+            return False
         if not (self.people_dirty.get(year) or self.plan_dirty.get(year)):
             return True
         answer = self.ask_export(f'{year}년 사람 입력')
@@ -1407,6 +1576,8 @@ class WorkspaceWindow(QMainWindow):
         return ''
 
     def browse_import(self):
+        if not self.confirm_leave_yaml():
+            return
         paths, encoding = choose_files(self, self.start_folder('import') or '.')
         if paths:
             self.settings.setValue('import_folder', str(Path(paths[0]).parent))
@@ -1477,6 +1648,8 @@ class WorkspaceWindow(QMainWindow):
                       + '\n'.join(lines[:20]) + ('\n...' if len(lines) > 20 else ''))
 
     def import_files(self, paths, encoding=None):
+        if not self._import_depth and not self.confirm_leave_yaml():
+            return ['YAML 미저장 변경으로 불러오기를 취소했습니다.'], []
         if not self._import_depth and not self.flush_autosave():
             return ['기존 변경을 저장하지 못해 불러오기를 취소했습니다.'], []
         if not self._import_depth and (self._binding_deferred_projects or self._binding_deferred_years):
@@ -1490,6 +1663,8 @@ class WorkspaceWindow(QMainWindow):
             if not self._import_depth and len(self.loaded_files) != before:
                 self.history_invalidated.emit()
                 self._bind_autosave()
+            if not self._import_depth and hasattr(self, 'yaml_panel'):
+                self.yaml_panel.sync_from_workspace(preserve_dirty=True)
 
     def _import_files(self, paths, encoding=None):
         """파일을 추가로 불러온다. 성공한 것만 반영하고 (실패 설명, 지원 외 항목)을 돌려준다."""
@@ -1640,11 +1815,13 @@ class WorkspaceWindow(QMainWindow):
         self.refresh_marks()
         self.settings.setValue('current_year', year)
         self.update_save_status()
+        if not self._import_depth and hasattr(self, 'yaml_panel'):
+            self.yaml_panel.sync_from_workspace(preserve_dirty=True)
 
     def year_combo_changed(self, index):
         year = self.year_combo.itemData(index)
         if year is not None and year != self.current_year:
-            if not self.flush_autosave():
+            if not self.confirm_leave_yaml() or not self.flush_autosave():
                 self.refresh_year_combo()
                 return
             self.select_year(year)
@@ -1694,6 +1871,8 @@ class WorkspaceWindow(QMainWindow):
         return True
 
     def add_year(self):
+        if not self.confirm_leave_yaml():
+            return
         year = (self.ask_year() or '').strip()
         if not year:
             return
@@ -1720,7 +1899,7 @@ class WorkspaceWindow(QMainWindow):
         if len(self.people_docs) <= 1:
             self.statusBar().showMessage('연도 문서는 최소 하나 있어야 합니다.')
             return
-        if not self.flush_autosave():
+        if not self.confirm_leave_yaml() or not self.flush_autosave():
             return
         if not self.keep_year(year):
             return
@@ -1770,6 +1949,8 @@ class WorkspaceWindow(QMainWindow):
         self.set_projects_dirty(False)
         self.current_year = None
         self.select_year(today)
+        if hasattr(self, 'yaml_panel'):
+            self.yaml_panel.sync_from_workspace(preserve_dirty=False)
         self.show_page(self.INPUT_PAGE)
         self.statusBar().showMessage('새로 만들기: 빈 입력으로 시작합니다.')
         self.update_save_status(reset=True)
@@ -1827,6 +2008,8 @@ class WorkspaceWindow(QMainWindow):
         self._source_metadata = {str(path): None for path, _ in chosen}
         self.current_year = None
         self.select_year(year)
+        if hasattr(self, 'yaml_panel'):
+            self.yaml_panel.sync_from_workspace(preserve_dirty=False)
         self.settings.setValue('loaded_files', self.loaded_files)
         self._bind_autosave()
         self.show_page(self.INPUT_PAGE)
@@ -2514,7 +2697,7 @@ class MainWindow(QMainWindow):
         if focus is not None and self.isAncestorOf(focus):
             focus.clearFocus()
         for workspace in self.workspaces:
-            if not workspace.flush_autosave():
+            if not workspace.confirm_leave_yaml() or not workspace.flush_autosave():
                 return False
         if revision is not None and revision != self.history.revision:
             self.statusBar().showMessage('이력이 변경되어 메뉴를 다시 열어야 합니다.')
@@ -2553,11 +2736,11 @@ class MainWindow(QMainWindow):
             focus = QApplication.focusWidget()
             if focus is not None and workspace.isAncestorOf(focus):
                 focus.clearFocus()
-            if not workspace.flush_autosave():
+            if not workspace.confirm_leave_yaml() or not workspace.flush_autosave():
                 self.mode_combo.blockSignals(True)
                 self.mode_combo.setCurrentIndex(current)
                 self.mode_combo.blockSignals(False)
-                return
+                return False
         self.mode_stack.setCurrentIndex(mode)
         self.mode_combo.blockSignals(True)
         self.mode_combo.setCurrentIndex(mode)
@@ -2565,6 +2748,7 @@ class MainWindow(QMainWindow):
         self.prepare_action.setEnabled(mode == self.PLANNING)
         self.setWindowTitle('인력 배분 — ' + ('계획작업' if mode else '실적작업'))
         self.settings.setValue('work_mode', mode)
+        return True
 
     def prepare_current(self):
         workspace = self.active_workspace
@@ -2606,7 +2790,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         original = self.mode_stack.currentIndex()
         for index, workspace in enumerate(self.workspaces):
-            self.set_mode(index)
+            if not self.set_mode(index):
+                event.ignore()
+                return
             if workspace._autosave_blocked:
                 if not workspace.confirm('복구 필요', '파일 복구에 실패했습니다. 안내된 복구 파일을 보존한 뒤 종료할까요?'):
                     event.ignore()

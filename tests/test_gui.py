@@ -1369,7 +1369,8 @@ class GuiTests(unittest.TestCase):
         _, h = self.write([project()], [person()])
         w = self.window()
         self.assertEqual(w.pages.currentIndex(), w.INPUT_PAGE)
-        self.assertEqual(w.pages.count(), 2)
+        self.assertEqual(w.pages.count(), 3)
+        self.assertEqual(w.pages.tabText(w.YAML_PAGE), 'YAML 편집')
         # 빈 입력에서 결과 화면으로 가면 바로 계산해 검증 오류를 보여 준다.
         w.show_page(w.RESULT_PAGE)
         self.assertEqual(w.pages.tabText(w.RESULT_PAGE), '결과')

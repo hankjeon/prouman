@@ -6,7 +6,7 @@ import re
 from PySide6.QtCore import QDate, QEvent, QItemSelection, QItemSelectionModel, QSize, Qt, QTimer, Signal, QRegularExpression
 from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPalette, QRegularExpressionValidator
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDateEdit, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollBar, QSizePolicy, QSplitter, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
                                QStyleFactory, QToolButton, QToolTip, QVBoxLayout, QWidget)
 
@@ -397,6 +397,7 @@ class ProjectEditor(QWidget):
     before_change = Signal()
     alias_renamed = Signal(str, str)
     alias_removed = Signal(str)
+    open_yaml_requested = Signal(str)
     NAME, ALIAS, START, END, TOTAL = range(5)
     YEARS = 6
     CENTER = YEARS // 2  # 짝수 열에서는 가운데 두 열 중 오른쪽에 관리 연도를 둔다.
@@ -412,6 +413,8 @@ class ProjectEditor(QWidget):
         self.excluded_year = self.managed_year_number()
         self.table = EditTable(['사업명', '약칭', '시작일', '종료일', '총 배정'], row_band=True)
         self.table.row_order_committed = self.reorder_project_rows
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._open_context_menu)
         self.table.set_date_columns(self.START, self.END)
         self.table.horizontalHeader().setSectionResizeMode(self.NAME, QHeaderView.Stretch)
         self.grid = EditTable([''] * (self.YEARS + 1), row_band=True)
@@ -595,6 +598,18 @@ class ProjectEditor(QWidget):
     def current(self):
         row = self.table.currentRow()
         return self.projects[row] if 0 <= row < len(self.projects) else None
+
+    def _open_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if item is not None:
+            self.table.setCurrentCell(item.row(), item.column())
+        project = self.current()
+        if project is None:
+            return
+        menu = QMenu(self)
+        action = menu.addAction('YAML에서 보기')
+        action.triggered.connect(lambda: self.open_yaml_requested.emit(project.alias or project.name))
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     @staticmethod
     def entry(project, year):
@@ -861,6 +876,7 @@ class PeopleEditor(QWidget):
     changed = Signal()
     before_change = Signal()
     year_changed = Signal()
+    open_yaml_requested = Signal(str)
     PROJECT, RATE, PROJECT_NAME = 0, 1, 2  # 사업명은 계산 칸이라 맨 끝에 두어 엑셀의 (사업, 참여율) 붙여넣기를 막지 않는다.
 
     def __init__(self, projects):
@@ -876,6 +892,8 @@ class PeopleEditor(QWidget):
         self.people_list.order_changed.connect(self.people_rows_moved)
         self.people_list.currentRowChanged.connect(lambda row: self.show_person())
         self.people_list.itemChanged.connect(self.name_edited)
+        self.people_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.people_list.customContextMenuRequested.connect(self._open_context_menu)
         self.add_button, self.remove_button = QPushButton('사람 추가'), QPushButton('사람 삭제')
         self.add_button.clicked.connect(self.add_person)
         self.remove_button.clicked.connect(self.remove_person)
@@ -972,6 +990,18 @@ class PeopleEditor(QWidget):
     def current(self):
         row = self.people_list.currentRow()
         return self.doc.people[row] if 0 <= row < len(self.doc.people) else None
+
+    def _open_context_menu(self, pos):
+        item = self.people_list.itemAt(pos)
+        if item is not None:
+            self.people_list.setCurrentItem(item)
+        person = self.current()
+        if person is None:
+            return
+        menu = QMenu(self)
+        action = menu.addAction('YAML에서 보기')
+        action.triggered.connect(lambda: self.open_yaml_requested.emit(person.name))
+        menu.exec(self.people_list.viewport().mapToGlobal(pos))
 
     def select_person(self, row):
         self.people_list.setCurrentRow(row)

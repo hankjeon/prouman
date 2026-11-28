@@ -2,6 +2,27 @@
 
 이 문서는 세션별 결정·실제 작업·검증·다음 할 일을 이어서 기록한다. 최신 세션을 위에 둔다. 기존 기능별 이력은 `docs/development-log.md`에 남아 있으며 이 문서로 소급해 옮기지 않는다. `완료`는 실제 수행·확인한 작업에만 사용한다.
 
+## 2026-11-28 — YAML 편집기 탭 및 전용 편집·검증 기능 구현
+
+- 사용자 요청 및 합의에 따라 각 작업모드(`실적작업`·`계획작업`) 좌측 세로 탭에 세 번째 탭 **`YAML 편집`**을 추가했다. 편집 중에는 자동 저장하지 않고 편집기 내부 `Ctrl+S`로 파싱·검증 후 문서·표·원본 파일에 반영하며, 파일 탭·화면·모드·연도·창 이탈 시 저장 여부(`저장`/`버리기`/`취소`)를 묻는다. 주석 보존은 하지 않고 기존 `read_*`/`dump_*` 직렬화 규칙을 유지했다.
+- 실제 구현(`src/allocation/yaml_editor.py`, `gui.py`, `editor.py`, `planning_gui.py`):
+  - 파일별 탭(`projects` + 연도별 `people`/`plan`, 인코딩 배지·수정 `*` 표시) 및 문서별 독립 `QTextDocument`(로컬 `Ctrl+Z`/`Ctrl+Y` 유지)
+  - VS Code Dark+ 스타일 어두운 배경(`#1E1E1E`, 고대비 팔레트 보호) 및 코딩 전용 고정폭 폰트(`D2Coding`·`Sarasa Mono K`·`Cascadia Mono`·`Consolas` 등, `Ctrl+±/0` 및 `Ctrl+휠` 글꼴 크기 연동), 들여쓰기 가이드 선
+  - YAML 전용 편집: `Tab`/`Shift+Tab` 공백 2칸 들여쓰기/내어쓰기(하드 탭 `\t` 차단), `Enter` 자동 들여쓰기, `Ctrl+/` 줄 주석 토글, `Alt+↑/↓` 줄 이동, `YAML 정리`
+  - `YamlSyntaxHighlighter` 문법 하이라이팅(키·문자열·날짜·숫자·키워드·마커·주석·금지 탭) 및 좌측 거터 줄 번호·들여쓰기 기반 그룹 폴딩/언폴딩(`1단계 보기`, `모두 접기`, `모두 펼치기`, `Ctrl+Shift+[/]`)
+  - 300ms 디바운스 실시간 검증(`read_*`·`load_inputs`/`load_plan`·`calculate`/`review_plan`) + 오류/경고 줄 물결 밑줄·클릭 점프
+  - 확장 기능: 사업 약칭(`alias`)·도메인 키 자동완성(`Ctrl+Space`), 약칭 마우스 호버 툴팁, 목차(아웃라인) 필터/점프 사이드바, 찾기/바꾸기(`Ctrl+F`/`Ctrl+H`), 도메인 스니펫 삽입, 변경 비교(Diff) 대화상자, 표 편집기 우클릭 `YAML에서 보기`
+- 문서·테스트 동기화: `README.md`, `docs/requirements.md`, `docs/data-model.md`, `docs/annual-planning.md`, `docs/test-cases.md`의 3탭 및 `YAML 편집` 내 `Ctrl+S` 예외를 갱신했고 `tests/test_gui.py`의 탭 개수 단정을 3으로 맞췄으며 `tests/test_yaml_editor_gui.py`(8개)를 추가했다.
+- 실행한 검증 및 결과(모두 실제 실행):
+  - `QT_QPA_PLATFORM=offscreen .\.venv\Scripts\python.exe -m unittest discover -s tests -q`: **305개 중 299개 통과·6개 skip(Linux 전용 셸 스크립트)·실패/오류 0개**
+  - `tests/test_yaml_editor_gui.py` 단독 실행: **8개 통과**
+  - `tests/test_theme_rendering.py` (offscreen): **3개 통과**
+  - PySide6 미설치 모의 discovery (`test_yaml_editor_gui.py`): **2개 통과·6개 skip·오류 0개**
+  - CLI 확인(`.\.venv\Scripts\python.exe src\main.py people\people_2027.yaml --all`): 종료 코드 0
+  - `git diff --check`: 수정/추가 파일 공백 오류 없음
+- 검증하지 못한 경계: 실제 Windows 창 실마우스·키보드·한글 IME 입력(자동완성 팝업·호버 툴팁·거터 클릭 실제 조작), 물리 고DPI 모니터, Linux 환경, 배포용 EXE(`build_win.ps1` 미빌드 — 사용자 요청 없음). 기존 미커밋 `myteam/` 파일 및 `.bak`은 변경·사용하지 않았다.
+- 다음 할 일: 사용자가 실제 GUI(`.\run_gui.ps1`)에서 `YAML 편집` 탭의 한글 폰트·폴딩·자동완성·호버·저장을 직접 확인한 뒤, 필요 시 EXE 빌드(`build_win.ps1`) 또는 Git 커밋 진행.
+
 ## 2026-11-28 — 자동 저장·실행 이력·metadata·테마 GitHub 게시 완료
 
 - 사용자 요청에 따라 Terra의 단계별 구현을 코디네이터가 독립 검토·보완시킨 뒤 소스 기능을 승인했다. 입력/계획/결과 자동 저장·복수 파일 복구/외부 변경 보호, 전역 Undo/Redo·다단계 이력, 새 원본/통합 파일, 수동 저장 제거·원본 불변 사본/확정 내보내기, metadata·숫자 입력, 밝은/어두운 테마를 소스에 반영했다.
