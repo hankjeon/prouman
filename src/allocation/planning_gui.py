@@ -3,7 +3,7 @@ from copy import deepcopy
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                               QPushButton, QSplitter, QVBoxLayout, QWidget)
+                               QMenu, QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from .document import (QUANTITY_HINT, AbsenceEntry, PlanDoc, PlanPersonEntry, dump_plan, dump_projects, quantity_units,
                        to_date, valid_year)
@@ -18,6 +18,7 @@ class PlanningPage(QWidget):
     before_change = Signal()
     save_requested = Signal()
     confirm_requested = Signal()
+    open_yaml_requested = Signal(str)
 
     def __init__(self, projects):
         super().__init__()
@@ -31,6 +32,8 @@ class PlanningPage(QWidget):
         self.people_list.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.people_list.currentRowChanged.connect(self.show_person)
         self.people_list.itemChanged.connect(self.name_edited)
+        self.people_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.people_list.customContextMenuRequested.connect(self._open_context_menu)
         add_person = QPushButton('사람 추가')
         add_person.clicked.connect(self.add_person)
         remove_person = QPushButton('사람 삭제')
@@ -113,6 +116,18 @@ class PlanningPage(QWidget):
     def current(self):
         row = self.people_list.currentRow()
         return self.doc.people[row] if 0 <= row < len(self.doc.people) else None
+
+    def _open_context_menu(self, pos):
+        item = self.people_list.itemAt(pos)
+        if item is not None:
+            self.people_list.setCurrentItem(item)
+        person = self.current()
+        if person is None:
+            return
+        menu = QMenu(self)
+        action = menu.addAction('YAML에서 보기')
+        action.triggered.connect(lambda: self.open_yaml_requested.emit(person.name))
+        menu.exec(self.people_list.viewport().mapToGlobal(pos))
 
     def _changed(self):
         self.last_generation = None
