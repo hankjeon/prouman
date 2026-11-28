@@ -150,7 +150,10 @@ def editor_colors(use_dark=True):
     return dict(DARK_COLORS if use_dark else LIGHT_COLORS)
 
 
-def coding_font(point_size=10):
+YAML_FONT_OFFSET = 2
+
+
+def coding_font(point_size=12):
     """한글/영문 2:1 정렬에 유리한 코딩 전용 고정폭 폰트를 고른다."""
     preferred = ('D2Coding', 'Sarasa Mono K', 'Noto Sans Mono CJK KR',
                  'Cascadia Mono', 'Consolas', 'DejaVu Sans Mono', 'Courier New')
@@ -161,7 +164,7 @@ def coding_font(point_size=10):
     else:
         font = QFont(chosen)
     font.setFixedPitch(True)
-    font.setPointSize(max(7, min(24, int(point_size))))
+    font.setPointSize(max(7, min(28, int(point_size))))
     return font
 
 
@@ -587,6 +590,7 @@ class YamlCodeEditor(QPlainTextEdit):
         self._kind = 'projects'
 
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.setCenterOnScroll(True)
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance('  '))
         self.setMouseTracking(True)
 
@@ -603,7 +607,7 @@ class YamlCodeEditor(QPlainTextEdit):
         self.cursorPositionChanged.connect(self._refresh_extra_selections)
         self.textChanged.connect(self._on_text_changed)
 
-        self.apply_editor_style(point_size=10, use_dark=True)
+        self.apply_editor_style(point_size=12, use_dark=True)
         self._update_gutter_width(0)
 
     def set_kind(self, kind):
@@ -679,56 +683,57 @@ class YamlCodeEditor(QPlainTextEdit):
 
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()
-        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
-        bottom = top + round(self.blockBoundingRect(block).height())
         cur_line = self.textCursor().blockNumber()
         fold_w = 16
         num_right = self._gutter.width() - fold_w - 4
 
-        while block.isValid() and top <= event.rect().bottom():
-            if block.isVisible() and bottom >= event.rect().top():
-                h = round(self.blockBoundingRect(block).height())
-                # 오류/경고 도트
-                diag = self._line_diagnostics.get(block_number + 1)
-                if diag:
-                    sev, _ = diag
-                    dot_color = QColor(c['error_wave'] if sev == 'ERROR' else c['warning_wave'])
-                    painter.setBrush(dot_color)
-                    painter.setPen(Qt.NoPen)
-                    painter.drawEllipse(3, top + max(2, (h - 6) // 2), 6, 6)
+        while block.isValid():
+            if block.isVisible():
+                rect = self.blockBoundingGeometry(block).translated(self.contentOffset())
+                top = round(rect.top())
+                h = round(rect.height())
+                if top > event.rect().bottom():
+                    break
+                if top + h >= event.rect().top():
+                    # 오류/경고 도트
+                    diag = self._line_diagnostics.get(block_number + 1)
+                    if diag:
+                        sev, _ = diag
+                        dot_color = QColor(c['error_wave'] if sev == 'ERROR' else c['warning_wave'])
+                        painter.setBrush(dot_color)
+                        painter.setPen(Qt.NoPen)
+                        painter.drawEllipse(3, top + max(2, (h - 6) // 2), 6, 6)
 
-                # 줄 번호
-                painter.setPen(QColor(c['fg'] if block_number == cur_line else c['gutter_fg']))
-                painter.drawText(10, top, num_right - 10, h, Qt.AlignRight | Qt.AlignVCenter,
-                                 str(block_number + 1))
+                    # 줄 번호
+                    painter.setPen(QColor(c['fg'] if block_number == cur_line else c['gutter_fg']))
+                    painter.drawText(10, top, num_right - 10, h, Qt.AlignRight | Qt.AlignVCenter,
+                                     str(block_number + 1))
 
-                # 폴딩 아이콘
-                if block_number in self._fold_ranges:
-                    painter.setPen(QColor(c['fold_icon']))
-                    marker = '▸' if block_number in self._folded_starts else '▾'
-                    painter.drawText(self._gutter.width() - fold_w - 1, top, fold_w, h,
-                                     Qt.AlignCenter, marker)
+                    # 폴딩 아이콘
+                    if block_number in self._fold_ranges:
+                        painter.setPen(QColor(c['fold_icon']))
+                        marker = '▸' if block_number in self._folded_starts else '▾'
+                        painter.drawText(self._gutter.width() - fold_w - 1, top, fold_w, h,
+                                         Qt.AlignCenter, marker)
             block = block.next()
-            top = bottom
-            bottom = top + round(self.blockBoundingRect(block).height())
             block_number += 1
 
     def handle_gutter_click(self, pos):
         block = self.firstVisibleBlock()
-        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
         while block.isValid():
-            h = round(self.blockBoundingRect(block).height())
-            if block.isVisible() and top <= pos.y() < top + h:
-                line = block.blockNumber()
-                if line in self._fold_ranges and pos.x() >= self._gutter.width() - 20:
-                    self.toggle_fold(line)
-                else:
-                    cursor = self.textCursor()
-                    cursor.setPosition(block.position())
-                    self.setTextCursor(cursor)
-                return
             if block.isVisible():
-                top += h
+                rect = self.blockBoundingGeometry(block).translated(self.contentOffset())
+                if rect.top() > pos.y():
+                    break
+                if rect.top() <= pos.y() < rect.bottom():
+                    line = block.blockNumber()
+                    if line in self._fold_ranges and pos.x() >= self._gutter.width() - 22:
+                        self.toggle_fold(line)
+                    else:
+                        cursor = self.textCursor()
+                        cursor.setPosition(block.position())
+                        self.setTextCursor(cursor)
+                    return
             block = block.next()
 
     # --- 들여쓰기 가이드 선 그리기 ---
@@ -744,16 +749,19 @@ class YamlCodeEditor(QPlainTextEdit):
         painter.setPen(QPen(guide, 1))
         offset_x = self.contentOffset().x() + self.document().documentMargin()
         block = self.firstVisibleBlock()
-        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
-        while block.isValid() and top <= event.rect().bottom():
+        while block.isValid():
             if block.isVisible():
-                h = round(self.blockBoundingRect(block).height())
-                text = block.text()
-                indent = _leading_spaces(text) if text.strip() else 0
-                for level in range(2, indent + 1, 2):
-                    x = round(offset_x + level * step)
-                    painter.drawLine(x, top, x, top + h)
-                top += h
+                rect = self.blockBoundingGeometry(block).translated(self.contentOffset())
+                top = round(rect.top())
+                h = round(rect.height())
+                if top > event.rect().bottom():
+                    break
+                if top + h >= event.rect().top():
+                    text = block.text()
+                    indent = _leading_spaces(text) if text.strip() else 0
+                    for level in range(2, indent + 1, 2):
+                        x = round(offset_x + level * step)
+                        painter.drawLine(x, top, x, top + h)
             block = block.next()
 
     # --- 폴딩 / 언폴딩 ---
@@ -767,8 +775,15 @@ class YamlCodeEditor(QPlainTextEdit):
         self._fold_ranges = yaml_fold_ranges(lines)
         self._folded_starts = {line for line in self._folded_starts if line in self._fold_ranges}
 
-    def _apply_folding(self):
+    def _apply_folding(self, anchor_line=None):
         doc = self.document()
+        before_top = None
+        if anchor_line is not None:
+            anchor_block = doc.findBlockByNumber(anchor_line)
+            if anchor_block.isValid() and anchor_block.isVisible():
+                before_top = self.blockBoundingGeometry(anchor_block).translated(self.contentOffset()).top()
+        saved_scroll = self.verticalScrollBar().value()
+
         hidden = set()
         for start in self._folded_starts:
             end = self._fold_ranges.get(start)
@@ -790,6 +805,23 @@ class YamlCodeEditor(QPlainTextEdit):
                 cur.setPosition(target.position())
                 self.setTextCursor(cur)
         doc.markContentsDirty(0, max(1, doc.characterCount()))
+
+        scroll = self.verticalScrollBar()
+        scroll.setValue(min(saved_scroll, scroll.maximum()))
+        if before_top is not None and anchor_line is not None:
+            anchor_block = doc.findBlockByNumber(anchor_line)
+            if anchor_block.isValid() and anchor_block.isVisible():
+                for _ in range(3):
+                    after_top = self.blockBoundingGeometry(anchor_block).translated(self.contentOffset()).top()
+                    diff = after_top - before_top
+                    line_h = max(1.0, self.blockBoundingRect(anchor_block).height())
+                    if abs(diff) < line_h * 0.5:
+                        break
+                    step = round(diff / line_h) or (1 if diff > 0 else -1)
+                    new_val = max(scroll.minimum(), min(scroll.maximum(), scroll.value() + step))
+                    if new_val == scroll.value():
+                        break
+                    scroll.setValue(new_val)
         self.viewport().update()
         self._gutter.update()
 
@@ -800,7 +832,7 @@ class YamlCodeEditor(QPlainTextEdit):
             self._folded_starts.remove(start_line)
         else:
             self._folded_starts.add(start_line)
-        self._apply_folding()
+        self._apply_folding(anchor_line=start_line)
 
     def fold_at_cursor(self, fold=True):
         cur_line = self.textCursor().blockNumber()
@@ -812,7 +844,7 @@ class YamlCodeEditor(QPlainTextEdit):
             self._folded_starts.add(target)
         else:
             self._folded_starts.discard(target)
-        self._apply_folding()
+        self._apply_folding(anchor_line=target)
 
     def fold_all(self):
         self._folded_starts = set(self._fold_ranges)
@@ -1218,7 +1250,7 @@ class YamlEditorPanel(QWidget):
         self._current_key = None
         self._switching_tab = False
         self._syncing_text = False
-        self._font_size = 10
+        self._font_size = 10 + YAML_FONT_OFFSET
 
         self.tab_bar = QTabBar()
         self.tab_bar.setExpanding(False)
@@ -1359,8 +1391,8 @@ class YamlEditorPanel(QWidget):
     # --- 동기화 및 탭 관리 ---
 
     def set_font_size(self, size):
-        self._font_size = size
-        self.editor.apply_editor_style(point_size=size, use_dark=True)
+        self._font_size = size + YAML_FONT_OFFSET
+        self.editor.apply_editor_style(point_size=self._font_size, use_dark=True)
 
     def apply_theme(self):
         self.editor.apply_editor_style(point_size=self._font_size, use_dark=True)

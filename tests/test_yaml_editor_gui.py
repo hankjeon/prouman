@@ -120,6 +120,11 @@ class YamlEditorGuiTests(unittest.TestCase):
         panel = self._open_yaml_tab(key='people:2026')
         ed = panel.editor
         self.assertTrue(ed.font().fixedPitch())
+        self.assertEqual(ed.font().pointSize(), 12)
+        self.window.change_font_size(2)
+        self.assertEqual(ed.font().pointSize(), 14)
+        self.window.change_font_size(0)
+        self.assertEqual(ed.font().pointSize(), 12)
         self.assertIn('#1E1E1E', ed.styleSheet().upper())
 
         ed.setPlainText('people:\n- name: 홍길동\nallocations:\n')
@@ -171,6 +176,48 @@ class YamlEditorGuiTests(unittest.TestCase):
         ed.jump_to_line(alloc_line + 2)
         self.assertTrue(ed.document().findBlockByNumber(alloc_line + 1).isVisible())
         ed.unfold_all()
+
+    def test_gutter_click_fold_unfold_keeps_same_screen_position(self):
+        panel = self._open_yaml_tab(key='people:2026')
+        ed = panel.editor
+        ed.resize(600, 260)
+        long_text = 'people:\n' + ''.join(
+            f'  - name: 홍길동{i}\n    allocations:\n      "A": "0.50000"\n      "B": "0.50000"\n'
+            for i in range(25)
+        )
+        ed.setPlainText(long_text)
+        self.app.processEvents()
+
+        # 위쪽 블록을 먼저 하나 접어 둔 상태에서 아래쪽 블록(81번 줄)을
+        # 거터의 실제 마우스 클릭으로 두 번 연속 눌러도 같은 자리에 유지되어야 한다.
+        ed.toggle_fold(1)
+        target_line = 81  # `- name: 홍길동20`
+        ed.verticalScrollBar().setValue(71)
+        c = ed.textCursor()
+        c.setPosition(ed.document().findBlockByNumber(target_line + 2).position())
+        ed.setTextCursor(c)
+        ed.verticalScrollBar().setValue(71)
+        self.app.processEvents()
+
+        target_block = ed.document().findBlockByNumber(target_line)
+        rect_before = ed.blockBoundingGeometry(target_block).translated(ed.contentOffset())
+        click_pos = QPointF(ed._gutter.width() - 8, rect_before.center().y())
+
+        # 첫 번째 클릭 -> 접힘
+        QTest.mouseClick(ed._gutter, Qt.LeftButton, Qt.NoModifier, click_pos.toPoint())
+        self.app.processEvents()
+        self.assertIn(target_line, ed.folded_starts())
+        self.assertFalse(ed.document().findBlockByNumber(target_line + 1).isVisible())
+        rect_after_fold = ed.blockBoundingGeometry(target_block).translated(ed.contentOffset())
+        self.assertAlmostEqual(rect_after_fold.top(), rect_before.top(), delta=2.0)
+
+        # 마우스를 옮기지 않고 같은 좌표 두 번째 클릭 -> 다시 펼쳐짐
+        QTest.mouseClick(ed._gutter, Qt.LeftButton, Qt.NoModifier, click_pos.toPoint())
+        self.app.processEvents()
+        self.assertNotIn(target_line, ed.folded_starts())
+        self.assertTrue(ed.document().findBlockByNumber(target_line + 1).isVisible())
+        rect_after_unfold = ed.blockBoundingGeometry(target_block).translated(ed.contentOffset())
+        self.assertAlmostEqual(rect_after_unfold.top(), rect_before.top(), delta=2.0)
 
     def test_manual_ctrl_s_no_autosave_and_full_roundtrip(self):
         w = self.window.actual
